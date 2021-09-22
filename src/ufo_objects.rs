@@ -83,37 +83,18 @@ impl UfoIdGen {
     }
 }
 
-pub struct UfoObjectConfigPrototype {
+pub struct UfoObjectParams {
     pub header_size: usize,
     pub stride: usize,
     pub min_load_ct: Option<usize>,
     pub read_only: bool,
+    pub populate: Box<UfoPopulateFn>,
+    pub element_ct: usize,
 }
 
-impl UfoObjectConfigPrototype {
-    pub fn new_prototype(
-        header_size: usize,
-        stride: usize,
-        min_load_ct: Option<usize>,
-        read_only: bool,
-    ) -> UfoObjectConfigPrototype {
-        UfoObjectConfigPrototype {
-            header_size,
-            stride,
-            min_load_ct,
-            read_only,
-        }
-    }
-
-    pub fn new_config(&self, ct: usize, populate: Box<UfoPopulateFn>) -> UfoObjectConfig {
-        UfoObjectConfig::new_config(
-            self.header_size,
-            ct,
-            self.stride,
-            self.read_only,
-            self.min_load_ct,
-            populate,
-        )
+impl UfoObjectParams {
+    pub fn new_config(self) -> UfoObjectConfig {
+        UfoObjectConfig::new_config(self)
     }
 }
 
@@ -130,40 +111,52 @@ pub struct UfoObjectConfig {
     pub(crate) read_only: bool,
 }
 
+// Getters
 impl UfoObjectConfig {
-    pub(crate) fn new_config(
-        header_size: usize,
-        element_ct: usize,
-        stride: usize,
-        read_only: bool,
-        min_load_ct: Option<usize>,
-        populate: Box<UfoPopulateFn>,
-    ) -> UfoObjectConfig {
-        let min_load_ct = min_load_ct.unwrap_or(1);
+    pub fn header_size(&self) -> usize {
+        self.header_size
+    }
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+    pub fn elements_loaded_at_once(&self) -> usize {
+        self.elements_loaded_at_once
+    }
+    pub fn element_ct(&self) -> usize {
+        self.element_ct
+    }
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+}
+
+impl UfoObjectConfig {
+    pub(crate) fn new_config(params: UfoObjectParams) -> UfoObjectConfig {
+        let min_load_ct = params.min_load_ct.unwrap_or(1);
         let page_size = mmap_wrapers::get_page_size();
 
         /* Headers and size */
-        let header_size_with_padding = up_to_nearest(header_size as usize, page_size);
-        let body_size_with_padding = up_to_nearest(stride * element_ct, page_size);
+        let header_size_with_padding = up_to_nearest(params.header_size as usize, page_size);
+        let body_size_with_padding = up_to_nearest(params.stride * params.element_ct, page_size);
         let true_size = header_size_with_padding + body_size_with_padding;
 
         /* loading quanta */
-        let min_load_bytes = num::integer::lcm(page_size, stride * min_load_ct);
-        let elements_loaded_at_once = min_load_bytes / stride;
-        assert!(elements_loaded_at_once * stride == min_load_bytes);
+        let min_load_bytes = num::integer::lcm(page_size, params.stride * min_load_ct);
+        let elements_loaded_at_once = min_load_bytes / params.stride;
+        assert!(elements_loaded_at_once * params.stride == min_load_bytes);
 
         UfoObjectConfig {
-            header_size,
-            stride,
-            read_only,
+            header_size: params.header_size,
+            stride: params.stride,
+            read_only: params.read_only,
 
             header_size_with_padding,
             true_size,
 
             elements_loaded_at_once,
-            element_ct,
+            element_ct: params.element_ct,
 
-            populate,
+            populate: params.populate,
         }
     }
 
@@ -433,6 +426,7 @@ pub struct UfoPopulateError;
 
 pub type UfoPopulateFn =
     dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
+
 pub(crate) struct UfoFileWriteback {
     ufo_id: UfoId,
     mmap: MmapFd,

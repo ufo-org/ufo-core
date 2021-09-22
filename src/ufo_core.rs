@@ -170,42 +170,6 @@ pub struct UfoCore {
 }
 
 impl UfoCore {
-    // pub fn print_segments(&self) {
-    //     self.state
-    //         .lock()
-    //         .expect("core locked")
-    //         .objects_by_segment
-    //         .iter()
-    //         .for_each(|e| {
-    //             eprintln!(
-    //                 "{:?}: {:#x}-{:#x}",
-    //                 e.value.read().expect("locked ufo").id,
-    //                 e.start,
-    //                 e.end
-    //             )
-    //         });
-    // }
-
-    // pub fn assert_segment_map(&self){
-    //     let core = self.state.lock().expect("core locked");
-    //     let addresses: Vec<(UfoId, usize, usize)> = core.objects_by_id.values()
-    //     .map(|ufo| {
-    //         let ufo = ufo.read().expect("ufo locked");
-    //         let base = ufo.mmap.as_ptr() as usize;
-    //         (ufo.id, base, base + ufo.mmap.length())
-    //     } ).collect();
-    //     for (id, l, h) in addresses {
-    //         if !core.objects_by_segment.contains_key(&l) || !core.objects_by_segment.contains_key(&h.saturating_sub(1)){
-    //             core
-    //             .objects_by_segment.iter()
-    //             .for_each(|e| {
-    //                 eprintln!("{:?}: {:#x}-{:#x}", e.value.read().expect("locked ufo").id, e.start, e.end)
-    //             });
-    //             panic!("{:?} missing! {:#x}-{:#x}", id, l, h);
-    //         }
-    //     }
-    // }
-
     pub fn new(config: UfoCoreConfig) -> Result<Arc<UfoCore>, std::io::Error> {
         // If this fails then there is nothing we should even try to do about it honestly
         let uffd = userfaultfd::UffdBuilder::new()
@@ -242,10 +206,6 @@ impl UfoCore {
         });
         pop_workers.request_worker();
         PopulateWorkers::spawn_worker(pop_workers.clone());
-
-        // std::thread::Builder::new()
-        //     .name("Ufo Core".to_string())
-        //     .spawn(move || UfoCore::populate_loop(pop_core))?;
 
         let msg_core = core.clone();
         std::thread::Builder::new()

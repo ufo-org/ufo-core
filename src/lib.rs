@@ -1,4 +1,11 @@
-#![feature(ptr_internals, once_cell, slice_ptr_get, mutex_unlock, thread_id_value, int_roundings)]
+#![feature(
+    ptr_internals,
+    once_cell,
+    slice_ptr_get,
+    mutex_unlock,
+    thread_id_value,
+    int_roundings
+)]
 
 mod bitwise_spinlock;
 mod errors;
