@@ -1,11 +1,8 @@
 *
+!*/
 !.gitignore
 
-!*.c
-!*.h
-
 !*.md
-!*.Rmd
 
 !*.rs
 !Cargo.toml

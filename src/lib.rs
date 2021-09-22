@@ -16,6 +16,7 @@ mod populate_workers;
 mod return_checks;
 mod ufo_core;
 mod ufo_objects;
+mod write_buffer;
 
 pub use errors::*;
 pub use ufo_core::*;

@@ -1,8 +1,8 @@
 use std::result::Result;
 use std::sync::{Arc, Mutex, RwLock};
-use std::{alloc, ffi::c_void};
 use std::{
     cmp::min,
+    ffi::c_void,
     ops::{Deref, Range},
     vec::Vec,
 };
@@ -25,61 +25,13 @@ use crate::populate_workers::{PopulateWorkers, RequestWorker, ShouldRun};
 use super::errors::*;
 use super::mmap_wrapers::*;
 use super::ufo_objects::*;
+use super::write_buffer::*;
 
 pub enum UfoInstanceMsg {
     Shutdown(WaitGroup),
     Allocate(promissory::Fulfiller<WrappedUfoObject>, UfoObjectConfig),
     Reset(WaitGroup, UfoId),
     Free(WaitGroup, UfoId),
-}
-
-struct UfoWriteBuffer {
-    ptr: *mut u8,
-    size: usize,
-}
-
-/// To avoid allocating memory over and over again for population functions keep around an
-/// allocated block and just grow it to the needed capacity
-impl UfoWriteBuffer {
-    fn new() -> UfoWriteBuffer {
-        UfoWriteBuffer {
-            size: 0,
-            ptr: std::ptr::null_mut(),
-        }
-    }
-
-    unsafe fn ensure_capcity(&mut self, capacity: usize) -> *mut u8 {
-        if self.size < capacity {
-            let layout = alloc::Layout::from_size_align(self.size, *PAGE_SIZE).unwrap();
-            let new_ptr = alloc::realloc(self.ptr, layout, capacity);
-
-            if new_ptr.is_null() {
-                alloc::handle_alloc_error(layout);
-            } else {
-                self.ptr = new_ptr;
-                self.size = capacity;
-            }
-        }
-        self.ptr
-    }
-
-    unsafe fn slice(&self) -> &[u8] {
-        std::slice::from_raw_parts(self.ptr, self.size)
-    }
-    // unsafe fn slice_mut(&self) -> &mut [u8] {
-    //     std::slice::from_raw_parts_mut(self.ptr, self.size)
-    // }
-}
-
-impl Drop for UfoWriteBuffer {
-    fn drop(&mut self) {
-        if self.size > 0 {
-            let layout = alloc::Layout::from_size_align(self.size, *PAGE_SIZE).unwrap();
-            unsafe {
-                alloc::dealloc(self.ptr, layout);
-            }
-        }
-    }
 }
 
 struct UfoChunks {
