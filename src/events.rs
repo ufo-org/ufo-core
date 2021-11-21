@@ -1,0 +1,149 @@
+use std::io::Error;
+
+pub type UfoEventConsumer = dyn Fn(&UfoEventandTimestamp) + Send;
+
+#[repr(C)]
+pub enum UfoUnloadDisposition {
+    /// Read only UFO
+    ReadOnly,
+    /// RW UFO but memory was clean
+    Clean,
+    /// RW UFO and dirty chunk will be written to disk, using more disk
+    NewlyDirty,
+    /// Chunk was already from disk, and was updated. No new disk useage
+    ExistingDirty,
+}
+
+#[repr(C)]
+pub struct UfoEventandTimestamp {
+    pub timestamp_nanos: u64,
+    pub event: UfoEvent,
+}
+
+pub(crate) enum UfoEventResult {
+    RecvErr,
+    NewCallback {
+        callback: Option<Box<UfoEventConsumer>>,
+        timestamp_nanos: u64,
+    },
+    Event(UfoEventandTimestamp),
+}
+
+#[repr(C)]
+pub enum UfoEvent {
+    NewCallbackAck,
+
+    /// Allocation uses memory equal to header_size_with_padding
+    AllocateUfo {
+        ufo_id: u64,
+
+        header_size_with_padding: usize,
+        body_size_with_padding: usize,
+        total_size_with_padding: usize,
+
+        intended_header_size: usize,
+        intended_body_size: usize,
+
+        read_only: bool,
+    },
+
+    /// Popuate a chunk, using memory equal to memory_used
+    /// memory_used might be larger than expected in some situations
+    ///  because of rounding up to the page boundary
+    PopulateChunk {
+        ufo_id: u64,
+
+        loaded_from_writeback: bool,
+        memory_used: usize,
+    },
+
+    GcCycleStart,
+
+    /// Unload the chunk, freeing RAM
+    /// the amount of disk used on a UfoUnloadDisposition::NewlyDirty equals memory_freed
+    UnloadChunk {
+        ufo_id: u64,
+
+        disposition: UfoUnloadDisposition,
+        memory_freed: usize,
+    },
+
+    UfoReset {
+        ufo_id: u64,
+        memory_freed: usize,
+        disk_freed: usize,
+    },
+
+    GcCycleEnd,
+
+    /// Free the UFO, removing all resource use
+    FreeUfo {
+        ufo_id: u64,
+
+        memory_freed: usize,
+        disk_freed: usize,
+    },
+
+    Shutdown,
+}
+
+pub(crate) fn start_qeueue_runner<Recv>(reciever: Recv) -> Result<(), Error>
+where
+    Recv: 'static + Send + Fn() -> UfoEventResult,
+{
+    std::thread::Builder::new()
+        .name("Message Queue Runner".to_string())
+        .spawn(move || {
+            let mut callback = None;
+            loop {
+                let recv_msg = reciever();
+                match (recv_msg, &callback) {
+                    // new callback function
+                    (
+                        UfoEventResult::NewCallback {
+                            callback: cb,
+                            timestamp_nanos,
+                        },
+                        _,
+                    ) => {
+                        if let Some(the_cb) = &cb {
+                            the_cb(&UfoEventandTimestamp {
+                                timestamp_nanos,
+                                event: UfoEvent::NewCallbackAck,
+                            });
+                        }
+                        callback = cb;
+                    }
+                    // Shutdown with an active callback
+                    (
+                        UfoEventResult::Event(
+                            msg
+                            @
+                            UfoEventandTimestamp {
+                                event: UfoEvent::Shutdown,
+                                ..
+                            },
+                        ),
+                        Some(cb),
+                    ) => {
+                        cb(&msg);
+                        return;
+                    }
+                    // Shutdown with no active callback
+                    (
+                        UfoEventResult::Event(UfoEventandTimestamp {
+                            event: UfoEvent::Shutdown,
+                            ..
+                        }),
+                        _,
+                    ) => return,
+                    // Normal event
+                    (UfoEventResult::Event(msg), Some(cb)) => cb(&msg),
+
+                    (UfoEventResult::RecvErr, _) => return, // hard shutdown
+                    _ => { /* NOP */ }
+                }
+            }
+        })?;
+    Ok(())
+}

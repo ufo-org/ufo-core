@@ -6,16 +6,6 @@ use std::os::unix::io::RawFd;
 use super::return_checks::*;
 use log::debug;
 
-static PAGE_SIZE: std::lazy::SyncOnceCell<usize> = std::lazy::SyncOnceCell::new();
-
-pub fn get_page_size() -> usize {
-    *PAGE_SIZE.get_or_init(|| {
-        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        assert!(ps > 0);
-        ps as usize
-    })
-}
-
 pub trait Mmap: Sized {
     fn as_ptr(&self) -> *mut u8;
 

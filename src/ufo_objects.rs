@@ -1,5 +1,4 @@
 use std::io::Error;
-use std::lazy::SyncLazy;
 use std::num::NonZeroUsize;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -8,12 +7,12 @@ use std::sync::{
 
 use anyhow::Result;
 use crossbeam::sync::WaitGroup;
-use thiserror::Error;
+use num::Integer;
 
-use log::{debug, error, trace};
+use log::{debug, trace};
 
 use crate::bitwise_spinlock::Bitlock;
-use crate::mmap_wrapers;
+use crate::events::{UfoEvent, UfoUnloadDisposition};
 use crate::once_await::OnceAwait;
 use crate::once_await::OnceFulfiller;
 
@@ -22,12 +21,6 @@ use super::math::*;
 use super::mmap_wrapers::*;
 use super::return_checks::*;
 use super::ufo_core::*;
-
-pub static PAGE_SIZE: SyncLazy<usize> = SyncLazy::new(|| {
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) };
-    assert!(page_size > 0);
-    page_size as usize
-});
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq, Copy, Clone, Hash)]
 #[repr(C)]
@@ -133,11 +126,12 @@ impl UfoObjectConfig {
 impl UfoObjectConfig {
     pub(crate) fn new_config(params: UfoObjectParams) -> UfoObjectConfig {
         let min_load_ct = params.min_load_ct.unwrap_or(1);
-        let page_size = mmap_wrapers::get_page_size();
+        let page_size = crate::get_page_size();
 
         /* Headers and size */
-        let header_size_with_padding = up_to_nearest(params.header_size as usize, page_size);
-        let body_size_with_padding = up_to_nearest(params.stride * params.element_ct, page_size);
+        let header_size_with_padding = (params.header_size as usize).next_multiple_of(&page_size);
+        let body_size_with_padding =
+            (params.stride * params.element_ct).next_multiple_of(&page_size);
         let true_size = header_size_with_padding + body_size_with_padding;
 
         /* loading quanta */
@@ -190,7 +184,7 @@ impl UfoOffset {
 
         let offset_from_header = absolute_offset_bytes - header_bytes;
         let bytes_loaded_at_once = ufo.config.elements_loaded_at_once * ufo.config.stride;
-        let chunk_number = offset_from_header.div_floor(bytes_loaded_at_once);
+        let chunk_number = div_floor(offset_from_header, bytes_loaded_at_once);
         assert!(chunk_number * bytes_loaded_at_once <= offset_from_header);
         assert!((chunk_number + 1) * bytes_loaded_at_once > offset_from_header);
 
@@ -216,12 +210,12 @@ impl UfoOffset {
     }
 
     pub fn as_index_floor(&self) -> usize {
-        self.offset_from_header().div_floor(self.stride)
+        div_floor(self.offset_from_header(), self.stride)
     }
 
     pub fn down_to_nearest_n_relative_to_header(&self, nearest: usize) -> UfoOffset {
         let offset = self.offset_from_header();
-        let offset = down_to_nearest(offset, nearest);
+        let offset = offset.prev_multiple_of(&nearest);
 
         let absolute_offset_bytes = self.header_bytes + offset;
 
@@ -248,16 +242,20 @@ impl std::fmt::Display for UfoOffset {
 }
 
 pub(crate) struct ChunkFreer {
+    event_sender: UfoEventSender,
     pivot: Option<BaseMmap>,
 }
 
 impl ChunkFreer {
-    pub fn new() -> Self {
-        ChunkFreer { pivot: None }
+    pub fn new(event_sender: UfoEventSender) -> Self {
+        ChunkFreer {
+            event_sender,
+            pivot: None,
+        }
     }
 
-    fn ensure_capcity(&mut self, to_fit: &UfoChunk) -> Result<&BaseMmap> {
-        let required_size = to_fit.size_in_pages().size_as_multiple_of_pages();
+    fn ensure_capcity(&mut self, to_fit: &UfoChunk) -> Result<()> {
+        let required_size = to_fit.size_in_page_bytes();
         trace!(target: "ufo_object", "ensuring pivot capacity {}", required_size);
         if let None = self.pivot {
             trace!(target: "ufo_object", "init pivot {}", required_size);
@@ -278,14 +276,16 @@ impl ChunkFreer {
             self.pivot = Some(pivot.resize(required_size)?);
         }
 
-        Ok(&self.pivot.as_ref().expect("just checked"))
+        Ok(())
     }
 
     pub fn free_chunk(&mut self, chunk: &mut UfoChunk) -> Result<usize> {
         if 0 == chunk.size() {
             return Ok(0);
         }
-        chunk.free_and_writeback_dirty(self.ensure_capcity(chunk)?)
+        self.ensure_capcity(chunk)?;
+        let pivot = self.pivot.as_ref().expect("just checked");
+        chunk.free_and_writeback_dirty(&self.event_sender, pivot)
     }
 }
 
@@ -293,7 +293,7 @@ pub(self) struct SizeInPages(usize);
 
 impl SizeInPages {
     fn size_as_multiple_of_pages(&self) -> usize {
-        up_to_nearest(self.0, *PAGE_SIZE)
+        self.0.next_multiple_of(&crate::get_page_size())
     }
 }
 
@@ -336,14 +336,19 @@ impl UfoChunk {
         self.hash.clone()
     }
 
-    pub fn free_and_writeback_dirty(&mut self, pivot: &BaseMmap) -> Result<usize> {
+    pub fn free_and_writeback_dirty(
+        &mut self,
+        event_queue: &UfoEventSender,
+        pivot: &BaseMmap,
+    ) -> Result<usize> {
         match (self.length, self.object.upgrade()) {
             (Some(length), Some(obj)) => {
                 let length_bytes = length.get();
+                let length_page_multiple = self.size_in_page_bytes();
                 let obj = obj.read().unwrap();
 
-                trace!(target: "ufo_object", "free chunk {:?}@{} ({}b)",
-                    self.ufo_id, self.offset.absolute_offset() , length_bytes
+                trace!(target: "ufo_object", "free chunk {:?}@{} ({}b / {}pageBytes)",
+                    self.ufo_id, self.offset.absolute_offset() , length_bytes, length_page_multiple
                 );
 
                 if !obj.config.should_try_writeback() {
@@ -353,11 +358,18 @@ impl UfoChunk {
                         let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
                         check_return_zero(libc::madvise(
                             data_ptr.cast(),
-                            length_bytes,
+                            length_page_multiple,
                             libc::MADV_DONTNEED,
                         ))?;
                     }
-                    return Ok(length_bytes);
+                    event_queue
+                        .send_event(UfoEvent::UnloadChunk {
+                            ufo_id: self.ufo_id.0,
+                            disposition: UfoUnloadDisposition::ReadOnly,
+                            memory_freed: length_page_multiple,
+                        })
+                        .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
+                    return Ok(length_page_multiple);
                 }
 
                 // We first remap the pages from the UFO into the file backing
@@ -370,7 +382,6 @@ impl UfoChunk {
                     .chunk_locks
                     .lock_uncontended(chunk_number)?;
                 unsafe {
-                    let length_page_multiple = self.size_in_pages().size_as_multiple_of_pages();
                     anyhow::ensure!(length_page_multiple <= pivot.length(), "Pivot too small");
                     let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
                     let pivot_ptr = pivot.as_ptr();
@@ -384,15 +395,35 @@ impl UfoChunk {
                     trace!(target: "ufo_object", "{:?} mremaped data to pivot", self.ufo_id);
                 }
 
+                let mut was_on_disk = false;
+                let mut written_to_disk = false;
                 if let Some(hash) = self.hash.get() {
                     let calculated_hash = pivot.with_slice(0, length_bytes, hash_function).unwrap(); // it should never be possible for this to fail
                     trace!(target: "ufo_object", "writeback hash matches {}", hash == &calculated_hash);
                     if hash != &calculated_hash {
-                        pivot.with_slice(0, length_bytes, |data| {
-                            obj.writeback_util.writeback(&self.offset, data)
-                        });
+                        let action = pivot
+                            .with_slice(0, length_bytes, |data| {
+                                obj.writeback_util.writeback(&self.offset, data)
+                            })
+                            .unwrap()?;
+                        was_on_disk = action.was_on_disk();
+                        written_to_disk = true;
                     }
                 }
+
+                let unload_disposition = match (was_on_disk, written_to_disk) {
+                    (false, true) => UfoUnloadDisposition::NewlyDirty,
+                    (true, true) => UfoUnloadDisposition::ExistingDirty,
+                    (_, false) => UfoUnloadDisposition::Clean,
+                };
+
+                event_queue
+                    .send_event(UfoEvent::UnloadChunk {
+                        ufo_id: self.ufo_id.0,
+                        disposition: unload_disposition,
+                        memory_freed: length_page_multiple,
+                    })
+                    .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
 
                 self.length = None;
                 trace!("unlock free {:?}.{}", obj.id, self.offset());
@@ -418,19 +449,17 @@ impl UfoChunk {
     pub(self) fn size_in_pages(&self) -> SizeInPages {
         SizeInPages(self.size())
     }
+
+    pub(crate) fn size_in_page_bytes(&self) -> usize {
+        self.size_in_pages().size_as_multiple_of_pages()
+    }
 }
-
-#[derive(Error, Debug)]
-#[error("Internal Ufo Error when populating")]
-pub struct UfoPopulateError;
-
-pub type UfoPopulateFn =
-    dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
 
 pub(crate) struct UfoFileWriteback {
     ufo_id: UfoId,
     mmap: MmapFd,
     chunk_ct: usize,
+    final_chunk_size_page_aligned: usize,
     pub(crate) chunk_locks: Bitlock,
     chunk_size: usize,
     total_bytes: usize,
@@ -440,11 +469,25 @@ pub(crate) struct UfoFileWriteback {
 }
 
 // someday make this atomic_from_mut
-fn atomic_bitset(target: &mut u8, mask: u8) {
+fn atomic_bitset(target: &mut u8, mask: u8) -> u8 {
     unsafe {
         let t = &mut *(target as *mut u8 as *mut AtomicU8);
         t.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some(x | mask))
-            .unwrap();
+            .unwrap()
+    }
+}
+
+pub(crate) enum UfoWritebackAction {
+    NewWriteback,
+    UpdateWriteback,
+}
+
+impl UfoWritebackAction {
+    pub fn was_on_disk(&self) -> bool {
+        match self {
+            UfoWritebackAction::NewWriteback => false,
+            _ => true,
+        }
     }
 }
 
@@ -454,16 +497,20 @@ impl UfoFileWriteback {
         cfg: &UfoObjectConfig,
         core: &Arc<UfoCore>,
     ) -> Result<UfoFileWriteback, Error> {
-        let page_size = *PAGE_SIZE;
+        let page_size = crate::get_page_size();
 
-        let chunk_ct = cfg.element_ct.div_ceil(cfg.elements_loaded_at_once);
+        let chunk_ct = div_ceil(cfg.element_ct, cfg.elements_loaded_at_once);
         assert!(chunk_ct * cfg.elements_loaded_at_once >= cfg.element_ct);
 
         let chunk_size = cfg.elements_loaded_at_once * cfg.stride;
+        let final_chunk_size_page_aligned = (match (cfg.true_size - cfg.header_size_with_padding) % chunk_size {
+            0 => chunk_size,
+            x => x,
+        }).next_multiple_of(&page_size);
 
-        let bitmap_bytes = chunk_ct.div_ceil(8); /*8 bits per byte*/
+        let bitmap_bytes = div_ceil(chunk_ct, 8); /*8 bits per byte*/
         // Now we want to get the bitmap bytes up to the next multiple of the page size
-        let bitmap_bytes = up_to_nearest(bitmap_bytes, page_size);
+        let bitmap_bytes = bitmap_bytes.next_multiple_of(&page_size);
         assert!(bitmap_bytes * 8 >= chunk_ct);
         assert!(bitmap_bytes.trailing_zeros() >= page_size.trailing_zeros());
 
@@ -473,7 +520,7 @@ impl UfoFileWriteback {
         // round the mmap up to the nearest chunk size
         // when loading we need to give back chunks this large so even though no useful user data may
         // be in the last chunk we still need to have this available for in the readback chunk
-        let data_bytes = up_to_nearest(cfg.element_ct * cfg.stride, chunk_size);
+        let data_bytes = (cfg.element_ct * cfg.stride).next_multiple_of(&chunk_size);
         let total_bytes = bitmap_bytes + bitlock_bytes + data_bytes;
 
         let temp_file =
@@ -495,17 +542,45 @@ impl UfoFileWriteback {
             chunk_ct,
             chunk_size,
             chunk_locks,
+            final_chunk_size_page_aligned,
             mmap,
             total_bytes,
             header_bytes: bitmap_bytes + bitlock_bytes,
         })
     }
 
+    pub fn used_bytes(&self) -> usize{
+        let chunk_ct = self.chunk_ct;
+        let last_chunk = chunk_ct - 1;
+
+        let bitmap_ptr = self.mmap.as_ptr();
+        let mut sum = 0;
+        // todo!("adjust the size of the last chunk in reporting (also round up to the page like on writeback)");
+        for x in 0..chunk_ct {
+            let byte = x >> 3;
+            let bit = x & 0b111;
+            let mask = 1 << bit;
+
+            let size = if x == last_chunk {
+                self.final_chunk_size_page_aligned
+            }else{
+                self.chunk_size
+            };
+
+            let is_set = unsafe { *bitmap_ptr.add(byte) & mask } > 0 ;
+            if is_set {
+                sum += size;
+            }
+
+        }
+        sum
+    }
+
     fn body_bytes(&self) -> usize {
         self.total_bytes - self.header_bytes
     }
 
-    pub(self) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<()> {
+    pub(self) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<UfoWritebackAction> {
         let off_head = offset.offset_from_header();
         if off_head > self.body_bytes() {
             anyhow::bail!("{} outside of range", off_head);
@@ -513,7 +588,7 @@ impl UfoFileWriteback {
 
         let chunk_number = offset.chunk_number();
         assert!(chunk_number < self.chunk_ct);
-        assert_eq!(off_head.div_floor(self.chunk_size), chunk_number);
+        assert_eq!(div_floor(off_head, self.chunk_size), chunk_number);
         let writeback_offset = self.header_bytes + off_head;
 
         let chunk_byte = chunk_number >> 3;
@@ -537,16 +612,19 @@ impl UfoFileWriteback {
         };
 
         writeback_arr.copy_from_slice(data);
-        atomic_bitset(bitmap_ptr, chunk_bit);
-
-        Ok(())
+        let old_bits = atomic_bitset(bitmap_ptr, chunk_bit);
+        if 0 != chunk_bit & old_bits {
+            Ok(UfoWritebackAction::NewWriteback)
+        } else {
+            Ok(UfoWritebackAction::UpdateWriteback)
+        }
     }
 
     pub fn try_readback<'a>(&'a self, offset: &UfoOffset) -> Option<&'a [u8]> {
         let off_head = offset.offset_from_header();
         trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head);
 
-        let chunk_number = off_head.div_floor(self.chunk_size);
+        let chunk_number = div_floor(off_head, self.chunk_size);
         let readback_offset = self.header_bytes + off_head;
 
         let chunk_byte = chunk_number >> 3;
@@ -566,7 +644,8 @@ impl UfoFileWriteback {
         }
     }
 
-    pub fn reset(&self) -> Result<()> {
+    pub fn reset(&self) -> Result<usize> {
+        let used_disk = self.used_bytes();
         let ptr = self.mmap.as_ptr();
         unsafe {
             check_return_zero(libc::madvise(
@@ -576,7 +655,7 @@ impl UfoFileWriteback {
                 libc::MADV_REMOVE,
             ))?;
         }
-        Ok(())
+        Ok(used_disk)
     }
 }
 
@@ -597,7 +676,8 @@ impl std::cmp::PartialEq for UfoObject {
 impl std::cmp::Eq for UfoObject {}
 
 impl UfoObject {
-    pub(crate) fn reset_internal(&mut self) -> anyhow::Result<()> {
+    /// returns the number of DISK bytes freed (from the writeback utility)
+    pub(crate) fn reset_internal(&mut self) -> anyhow::Result<usize> {
         let length = self.config.true_size - self.config.header_size_with_padding;
         unsafe {
             check_return_zero(libc::madvise(
@@ -609,9 +689,7 @@ impl UfoObject {
                 libc::MADV_DONTNEED,
             ))?;
         }
-        self.writeback_util.reset()?;
-
-        Ok(())
+        Ok(self.writeback_util.reset()?)
     }
 
     pub fn header_ptr(&self) -> *mut std::ffi::c_void {

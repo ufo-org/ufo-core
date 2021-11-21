@@ -6,6 +6,8 @@ use num::Integer;
 use std::fmt::Display;
 use thiserror::Error;
 
+use crate::experimental_compat::thread_id_u64;
+
 pub(crate) struct BitGuard<'a> {
     idx: usize,
     parent: &'a Bitlock,
@@ -116,7 +118,7 @@ impl Bitlock {
         let mapped_idx = self.map_index(idx)?;
         let target = self.atomic_byte(&mapped_idx);
 
-        let seed = (idx as u64).wrapping_add(std::thread::current().id().as_u64().get());
+        let seed = (idx as u64).wrapping_add(thread_id_u64(std::thread::current().id()));
         let mut xor_rnd = SplitMix64::from_seed(seed);
         let mut ctr = 0;
 

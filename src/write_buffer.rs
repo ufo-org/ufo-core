@@ -1,7 +1,5 @@
 use std::alloc;
 
-use super::ufo_objects::PAGE_SIZE;
-
 pub(crate) struct UfoWriteBuffer {
     pub ptr: *mut u8,
     pub size: usize,
@@ -19,7 +17,7 @@ impl UfoWriteBuffer {
 
     pub(crate) unsafe fn ensure_capcity(&mut self, capacity: usize) -> *mut u8 {
         if self.size < capacity {
-            let layout = alloc::Layout::from_size_align(self.size, *PAGE_SIZE).unwrap();
+            let layout = alloc::Layout::from_size_align(self.size, crate::get_page_size()).unwrap();
             let new_ptr = alloc::realloc(self.ptr, layout, capacity);
 
             if new_ptr.is_null() {
@@ -43,7 +41,7 @@ impl UfoWriteBuffer {
 impl Drop for UfoWriteBuffer {
     fn drop(&mut self) {
         if self.size > 0 {
-            let layout = alloc::Layout::from_size_align(self.size, *PAGE_SIZE).unwrap();
+            let layout = alloc::Layout::from_size_align(self.size, crate::get_page_size()).unwrap();
             unsafe {
                 alloc::dealloc(self.ptr, layout);
             }

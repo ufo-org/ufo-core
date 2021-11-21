@@ -1,15 +1,15 @@
 use num::Integer;
 
-pub fn up_to_nearest<T>(x: T, nearest: T) -> T
+pub fn div_floor<T>(x: T, div: T) -> T
 where
-    T: Integer,
+    T: Integer + Clone,
 {
-    x.div_ceil(&nearest) * nearest
+    x.prev_multiple_of(&div) / div
 }
 
-pub fn down_to_nearest<T>(x: T, nearest: T) -> T
+pub fn div_ceil<T>(x: T, div: T) -> T
 where
-    T: Integer,
+    T: Integer + Clone,
 {
-    x.div_floor(&nearest) * nearest
+    x.next_multiple_of(&div) / div
 }

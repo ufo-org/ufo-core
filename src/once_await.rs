@@ -3,6 +3,8 @@ use std::sync::{
     Arc, Condvar, Mutex,
 };
 
+use crate::experimental_compat::droplockster;
+
 pub(crate) struct OnceAwait<T> {
     value: AtomicPtr<T>,
     mutex: Mutex<()>,
@@ -34,7 +36,7 @@ impl<T> OnceFulfiller<T> for OnceAwait<T> {
                 // on success we wake everyone up!
                 let guard = self.mutex.lock().unwrap();
                 self.condition.notify_all();
-                Mutex::unlock(guard);
+                droplockster(guard);
             }
             Err(_) => {
                 // On an error we did not initialize the value, reconstruct and drop the box

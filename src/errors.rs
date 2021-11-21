@@ -61,3 +61,22 @@ impl From<crossbeam::channel::RecvError> for UfoAllocateErr {
         UfoAllocateErr::MessageSendError
     }
 }
+
+#[derive(Error, Debug)]
+#[error("Internal Ufo Error when populating")]
+pub struct UfoPopulateError;
+
+pub type UfoPopulateFn =
+    dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
+
+impl<T> From<std::sync::PoisonError<T>> for UfoPopulateError {
+    fn from(_: std::sync::PoisonError<T>) -> Self {
+        UfoPopulateError
+    }
+}
+
+impl From<UfoLookupErr> for UfoPopulateError {
+    fn from(_e: UfoLookupErr) -> Self {
+        UfoPopulateError
+    }
+}
