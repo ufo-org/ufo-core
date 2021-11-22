@@ -14,11 +14,6 @@ pub enum UfoUnloadDisposition {
     ExistingDirty,
 }
 
-#[repr(C)]
-pub struct UfoEventandTimestamp {
-    pub timestamp_nanos: u64,
-    pub event: UfoEvent,
-}
 
 pub(crate) enum UfoEventResult {
     RecvErr,
@@ -27,6 +22,12 @@ pub(crate) enum UfoEventResult {
         timestamp_nanos: u64,
     },
     Event(UfoEventandTimestamp),
+}
+
+#[repr(C)]
+pub struct UfoEventandTimestamp {
+    pub timestamp_nanos: u64,
+    pub event: UfoEvent,
 }
 
 #[repr(C)]

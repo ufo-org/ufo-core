@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum UfoLookupErr {
+pub enum UfoInternalErr {
     #[error("Core shutdown")]
     CoreShutdown,
     #[error("Core non functional, {0}")]
@@ -10,23 +10,25 @@ pub enum UfoLookupErr {
     UfoLockBroken,
     #[error("Ufo not found")]
     UfoNotFound,
+    #[error("Ufo State Error: {0}")]
+    UfoStateError(String),
 }
 
-impl<T> From<std::sync::PoisonError<T>> for UfoLookupErr {
+impl<T> From<std::sync::PoisonError<T>> for UfoInternalErr {
     fn from(_: std::sync::PoisonError<T>) -> Self {
-        UfoLookupErr::UfoLockBroken
+        UfoInternalErr::UfoLockBroken
     }
 }
 
-impl<T> From<std::sync::mpsc::SendError<T>> for UfoLookupErr {
+impl<T> From<std::sync::mpsc::SendError<T>> for UfoInternalErr {
     fn from(_e: std::sync::mpsc::SendError<T>) -> Self {
-        UfoLookupErr::CoreBroken("Error when sending messsge to the core".into())
+        UfoInternalErr::CoreBroken("Error when sending messsge to the core".into())
     }
 }
 
-impl<T> From<crossbeam::channel::SendError<T>> for UfoLookupErr {
+impl<T> From<crossbeam::channel::SendError<T>> for UfoInternalErr {
     fn from(_e: crossbeam::channel::SendError<T>) -> Self {
-        UfoLookupErr::CoreBroken("Error when sending messsge to the core".into())
+        UfoInternalErr::CoreBroken("Error when sending messsge to the core".into())
     }
 }
 
@@ -66,17 +68,14 @@ impl From<crossbeam::channel::RecvError> for UfoAllocateErr {
 #[error("Internal Ufo Error when populating")]
 pub struct UfoPopulateError;
 
-pub type UfoPopulateFn =
-    dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
-
 impl<T> From<std::sync::PoisonError<T>> for UfoPopulateError {
     fn from(_: std::sync::PoisonError<T>) -> Self {
         UfoPopulateError
     }
 }
 
-impl From<UfoLookupErr> for UfoPopulateError {
-    fn from(_e: UfoLookupErr) -> Self {
+impl From<UfoInternalErr> for UfoPopulateError {
+    fn from(_e: UfoInternalErr) -> Self {
         UfoPopulateError
     }
 }

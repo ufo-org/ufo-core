@@ -26,6 +26,22 @@ pub use crate::events::*;
 pub use crate::ufo_core::*;
 pub use crate::ufo_objects::*;
 
+pub type UfoPopulateFn =
+    dyn Fn(usize, usize, *mut u8) -> Result<(), UfoPopulateError> + Sync + Send;
+
+#[repr(C)]
+pub enum UfoWriteListenerEvent {
+    Writeback{
+        start_idx: usize,
+        end_idx: usize,
+        data: *const u8,
+    },
+    Reset
+}
+
+pub type UfoWritebackListenerFn = dyn Fn(UfoWriteListenerEvent) + Sync + Send;
+
+
 static PAGE_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub(crate) fn get_page_size() -> usize {

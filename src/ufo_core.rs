@@ -58,16 +58,20 @@ impl UfoChunks {
         self.loaded_chunks.push_back(chunk);
     }
 
-    fn drop_ufo_chunks(&mut self, ufo_id: UfoId) -> usize {
+    fn drop_ufo_chunks(&mut self, ufo: &UfoObject) -> Result<usize, UfoInternalErr> {
         let before = self.used_memory;
         let chunks = &mut self.loaded_chunks;
+
+
         chunks
             .iter_mut()
-            .filter(|c| c.ufo_id() == ufo_id)
-            .for_each(UfoChunk::mark_freed);
+            .filter(|c| c.ufo_id() == ufo.id)
+            .map(UfoChunk::mark_freed_notify_listener)
+            .reduce(Result::and)
+            .unwrap_or(Ok(()))?;
         self.used_memory = chunks.iter().map(UfoChunk::size_in_page_bytes).sum();
 
-        before - self.used_memory
+        Ok(before - self.used_memory)
     }
 
     fn free_until_low_water_mark(
@@ -139,14 +143,14 @@ impl UfoEventSender {
     pub fn new_callback(
         &self,
         callback: Option<Box<UfoEventConsumer>>,
-    ) -> Result<(), UfoLookupErr> {
+    ) -> Result<(), UfoInternalErr> {
         Ok(self.sender.send(UfoEventResult::NewCallback {
             callback,
             timestamp_nanos: self.zero_time.elapsed().as_nanos() as u64,
         })?)
     }
 
-    pub fn send_event(&self, event: UfoEvent) -> Result<(), UfoLookupErr> {
+    pub fn send_event(&self, event: UfoEvent) -> Result<(), UfoInternalErr> {
         Ok(self
             .sender
             .send(UfoEventResult::Event(UfoEventandTimestamp {
@@ -255,30 +259,30 @@ impl UfoCore {
         }
     }
 
-    pub fn get_ufo_by_id(&self, id: UfoId) -> Result<WrappedUfoObject, UfoLookupErr> {
+    pub fn get_ufo_by_id(&self, id: UfoId) -> Result<WrappedUfoObject, UfoInternalErr> {
         self.get_locked_state()
-            .map_err(|e| UfoLookupErr::CoreBroken(format!("{:?}", e)))?
+            .map_err(|e| UfoInternalErr::CoreBroken(format!("{:?}", e)))?
             .objects_by_id
             .get(&id)
             .cloned()
             .map(Ok)
-            .unwrap_or_else(|| Err(UfoLookupErr::UfoNotFound))
+            .unwrap_or_else(|| Err(UfoInternalErr::UfoNotFound))
     }
 
-    pub fn get_ufo_by_address(&self, ptr: usize) -> Result<WrappedUfoObject, UfoLookupErr> {
+    pub fn get_ufo_by_address(&self, ptr: usize) -> Result<WrappedUfoObject, UfoInternalErr> {
         self.get_locked_state()
-            .map_err(|e| UfoLookupErr::CoreBroken(format!("{:?}", e)))?
+            .map_err(|e| UfoInternalErr::CoreBroken(format!("{:?}", e)))?
             .objects_by_segment
             .get(&ptr)
             .cloned()
             .map(Ok)
-            .unwrap_or_else(|| Err(UfoLookupErr::UfoNotFound))
+            .unwrap_or_else(|| Err(UfoInternalErr::UfoNotFound))
     }
 
     pub fn new_event_callback(
         &self,
         callback: Option<Box<UfoEventConsumer>>,
-    ) -> Result<(), UfoLookupErr> {
+    ) -> Result<(), UfoInternalErr> {
         self.ufo_event_queue.lock()?.new_callback(callback)
     }
 
@@ -515,8 +519,8 @@ impl UfoCore {
                 }?;
             }
 
-            let ufo_event = UfoEvent::AllocateUfo{
-                ufo_id:id.0,
+            let ufo_event = UfoEvent::AllocateUfo {
+                ufo_id: id.0,
 
                 intended_body_size: config.element_ct() * config.stride(),
                 intended_header_size: config.header_size(),
@@ -545,13 +549,17 @@ impl UfoCore {
                 .objects_by_segment
                 .insert(segment, ufo.clone())
                 .expect("ufos must not overlap");
-            
+
             event_sender.send_event(ufo_event)?;
 
             Ok(ufo)
         }
 
-        fn reset_impl(this: &Arc<UfoCore>, event_sender: &UfoEventSender, ufo_id: UfoId) -> anyhow::Result<()> {
+        fn reset_impl(
+            this: &Arc<UfoCore>,
+            event_sender: &UfoEventSender,
+            ufo_id: UfoId,
+        ) -> anyhow::Result<()> {
             let state = &mut *this.get_locked_state()?;
 
             let ufo = &mut *(state
@@ -565,18 +573,24 @@ impl UfoCore {
             debug!(target: "ufo_core", "resetting {:?}", ufo.id);
 
             let disk_freed = ufo.reset_internal()?;
-            let memory_freed = state.loaded_chunks.drop_ufo_chunks(ufo_id);
+            let memory_freed = state.loaded_chunks.drop_ufo_chunks(ufo)?;
 
-            event_sender.send_event(UfoEvent::UfoReset{
+            event_sender.send_event(UfoEvent::UfoReset {
                 ufo_id: ufo_id.0,
                 disk_freed,
-                memory_freed
+                memory_freed,
             })?;
 
             Ok(())
         }
 
-        fn free_impl(this: &Arc<UfoCore>, event_sender: &UfoEventSender, ufo_id: UfoId) -> anyhow::Result<()> {
+        fn free_impl(
+            this: &Arc<UfoCore>,
+            event_sender: &UfoEventSender,
+            ufo_id: UfoId,
+        ) -> anyhow::Result<()> {
+            //TODO: When freeing we need to check all chunks and call the writeback listener as needed
+            // but only if there is a writeback function
             let state = &mut *this.get_locked_state()?;
             let ufo = state
                 .objects_by_id
@@ -595,7 +609,7 @@ impl UfoCore {
                 .get_entry(&mmap_base)
                 .map(Ok)
                 .unwrap_or_else(|| Err(anyhow::anyhow!("memory segment missing")))?;
-            
+
             debug_assert_eq!(
                 mmap_base, *segment.start,
                 "mmap lower bound not equal to segment lower bound"
@@ -611,22 +625,25 @@ impl UfoCore {
             let start_addr = segment.start.clone();
             state.objects_by_segment.remove_by_start(&start_addr);
 
-            let chunk_memory_freed = state.loaded_chunks.drop_ufo_chunks(ufo_id);
+            let chunk_memory_freed = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
             let header_bytes = ufo.config.header_size_with_padding;
-            
+
             let disk_freed = ufo.writeback_util.used_bytes();
 
-
-            event_sender.send_event(UfoEvent::FreeUfo{
+            event_sender.send_event(UfoEvent::FreeUfo {
                 ufo_id: ufo_id.0,
                 memory_freed: chunk_memory_freed + header_bytes,
-                disk_freed
+                disk_freed,
             })?;
 
             Ok(())
         }
 
-        fn shutdown_impl<F>(this: &Arc<UfoCore>, event_sender: &UfoEventSender, populate_pool: Arc<PopulateWorkers<F>>) {
+        fn shutdown_impl<F>(
+            this: &Arc<UfoCore>,
+            event_sender: &UfoEventSender,
+            populate_pool: Arc<PopulateWorkers<F>>,
+        ) {
             info!(target: "ufo_core", "shutting down");
             let keys: Vec<UfoId> = {
                 let state = &mut *this.get_locked_state().expect("err on shutdown");
@@ -643,7 +660,9 @@ impl UfoCore {
                 Ok(m) => match m {
                     UfoInstanceMsg::Allocate(fulfiller, cfg) => {
                         fulfiller
-                            .fulfill(allocate_impl(&this, &event_sender, cfg).expect("Allocate Error"))
+                            .fulfill(
+                                allocate_impl(&this, &event_sender, cfg).expect("Allocate Error"),
+                            )
                             .unwrap_or(());
                     }
                     UfoInstanceMsg::Reset(_, ufo_id) => {

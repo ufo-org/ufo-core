@@ -1,3 +1,4 @@
+use core::slice;
 use std::io::Error;
 use std::num::NonZeroUsize;
 use std::sync::{
@@ -15,6 +16,7 @@ use crate::bitwise_spinlock::Bitlock;
 use crate::events::{UfoEvent, UfoUnloadDisposition};
 use crate::once_await::OnceAwait;
 use crate::once_await::OnceFulfiller;
+use crate::{UfoPopulateFn, UfoWriteListenerEvent, UfoWritebackListenerFn};
 
 use super::errors::*;
 use super::math::*;
@@ -82,6 +84,7 @@ pub struct UfoObjectParams {
     pub min_load_ct: Option<usize>,
     pub read_only: bool,
     pub populate: Box<UfoPopulateFn>,
+    pub writeback_listener: Option<Box<UfoWritebackListenerFn>>,
     pub element_ct: usize,
 }
 
@@ -93,6 +96,7 @@ impl UfoObjectParams {
 
 pub struct UfoObjectConfig {
     pub(crate) populate: Box<UfoPopulateFn>,
+    pub(crate) writeback_listener: Option<Box<UfoWritebackListenerFn>>,
 
     pub(crate) header_size_with_padding: usize,
     pub(crate) header_size: usize,
@@ -151,6 +155,7 @@ impl UfoObjectConfig {
             element_ct: params.element_ct,
 
             populate: params.populate,
+            writeback_listener: params.writeback_listener,
         }
     }
 
@@ -299,6 +304,7 @@ impl SizeInPages {
 
 pub(crate) struct UfoChunk {
     ufo_id: UfoId,
+    has_listener: bool,
     object: Weak<RwLock<UfoObject>>,
     offset: UfoOffset,
     length: Option<NonZeroUsize>,
@@ -321,6 +327,7 @@ impl UfoChunk {
         );
         UfoChunk {
             ufo_id: object.id,
+            has_listener: object.config.writeback_listener.is_some(),
             object: Arc::downgrade(arc),
             offset,
             length: NonZeroUsize::new(length),
@@ -401,13 +408,32 @@ impl UfoChunk {
                     let calculated_hash = pivot.with_slice(0, length_bytes, hash_function).unwrap(); // it should never be possible for this to fail
                     trace!(target: "ufo_object", "writeback hash matches {}", hash == &calculated_hash);
                     if hash != &calculated_hash {
-                        let action = pivot
-                            .with_slice(0, length_bytes, |data| {
-                                obj.writeback_util.writeback(&self.offset, data)
-                            })
-                            .unwrap()?;
-                        was_on_disk = action.was_on_disk();
-                        written_to_disk = true;
+                        let (_, rb): ((), Result<()>) = rayon::join(
+                            || {
+                                let start = self.offset.as_index_floor();
+                                let end = (obj.config.elements_loaded_at_once() + start)
+                                    .min(obj.config.element_ct());
+                                let ptr = pivot.as_ptr();
+                                if let Some(listener) = &obj.config.writeback_listener {
+                                    listener(UfoWriteListenerEvent::Writeback{
+                                        start_idx: start,
+                                        end_idx: end,
+                                        data: ptr
+                                    });
+                                }
+                            },
+                            || {
+                                let writeback_action_taken = pivot
+                                    .with_slice(0, length_bytes, |data| {
+                                        obj.writeback_util.writeback(&self.offset, data)
+                                    })
+                                    .unwrap()?;
+                                was_on_disk = writeback_action_taken.was_on_disk();
+                                written_to_disk = true;
+                                Ok(())
+                            },
+                        );
+                        rb?;
                     }
                 }
 
@@ -434,8 +460,48 @@ impl UfoChunk {
         }
     }
 
-    pub fn mark_freed(&mut self) {
+    pub fn mark_freed_notify_listener(&mut self) -> std::result::Result<(), UfoInternalErr> {
+        if let None = self.length {
+            return Ok(()); // Already freed
+        }
+        
+        if !self.has_listener {
+            // No listener, just drop it
+            self.length = None;
+            return Ok(());
+        }
+
+        let obj = self.object.upgrade()
+            .ok_or(UfoInternalErr::UfoNotFound)?;
+        let obj =  obj.read()?;
+
+        // assert!(obj.config.writeback_listener.is_some(), "no listener, use make_freed (requires no lock)");
+        // assert!(obj.config.should_try_writeback(), "not performing writeback, no need to call listener");
+
+        let known_hash = self.hash.get()
+            .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
+        
+        let chunk_slice = unsafe {
+            let chunk_ptr =  obj.body_ptr().add(self.offset.offset_from_header());
+            let chunk_length = self.length.unwrap(/* check at function start*/).get();
+            slice::from_raw_parts(chunk_ptr.cast(), chunk_length)
+        };
+
+        let calculated_hash = hash_function(chunk_slice);
+
+        if known_hash != calculated_hash {
+            let start = self.offset.as_index_floor();
+            let end = obj.config.element_ct
+                .min(start + self.size() );
+            (obj.config.writeback_listener.as_ref().unwrap())(UfoWriteListenerEvent::Writeback{
+                start_idx: start,
+                end_idx: end,
+                data: chunk_slice.as_ptr()
+            });
+        }
+
         self.length = None;
+        Ok(())
     }
 
     pub fn ufo_id(&self) -> UfoId {
@@ -503,10 +569,12 @@ impl UfoFileWriteback {
         assert!(chunk_ct * cfg.elements_loaded_at_once >= cfg.element_ct);
 
         let chunk_size = cfg.elements_loaded_at_once * cfg.stride;
-        let final_chunk_size_page_aligned = (match (cfg.true_size - cfg.header_size_with_padding) % chunk_size {
-            0 => chunk_size,
-            x => x,
-        }).next_multiple_of(&page_size);
+        let final_chunk_size_page_aligned =
+            (match (cfg.true_size - cfg.header_size_with_padding) % chunk_size {
+                0 => chunk_size,
+                x => x,
+            })
+            .next_multiple_of(&page_size);
 
         let bitmap_bytes = div_ceil(chunk_ct, 8); /*8 bits per byte*/
         // Now we want to get the bitmap bytes up to the next multiple of the page size
@@ -549,7 +617,7 @@ impl UfoFileWriteback {
         })
     }
 
-    pub fn used_bytes(&self) -> usize{
+    pub fn used_bytes(&self) -> usize {
         let chunk_ct = self.chunk_ct;
         let last_chunk = chunk_ct - 1;
 
@@ -563,15 +631,14 @@ impl UfoFileWriteback {
 
             let size = if x == last_chunk {
                 self.final_chunk_size_page_aligned
-            }else{
+            } else {
                 self.chunk_size
             };
 
-            let is_set = unsafe { *bitmap_ptr.add(byte) & mask } > 0 ;
+            let is_set = unsafe { *bitmap_ptr.add(byte) & mask } > 0;
             if is_set {
                 sum += size;
             }
-
         }
         sum
     }
@@ -689,7 +756,11 @@ impl UfoObject {
                 libc::MADV_DONTNEED,
             ))?;
         }
-        Ok(self.writeback_util.reset()?)
+        let writeback_bytes_freed = self.writeback_util.reset()?;
+        if let Some(listener) =  &self.config.writeback_listener {
+            listener(UfoWriteListenerEvent::Reset);
+        }
+        Ok(writeback_bytes_freed)
     }
 
     pub fn header_ptr(&self) -> *mut std::ffi::c_void {
@@ -706,10 +777,10 @@ impl UfoObject {
         }
     }
 
-    pub fn reset(&mut self) -> Result<WaitGroup, UfoLookupErr> {
+    pub fn reset(&mut self) -> Result<WaitGroup, UfoInternalErr> {
         let wait_group = crossbeam::sync::WaitGroup::new();
         let core = match self.core.upgrade() {
-            None => return Err(UfoLookupErr::CoreShutdown),
+            None => return Err(UfoInternalErr::CoreShutdown),
             Some(x) => x,
         };
 
@@ -719,10 +790,10 @@ impl UfoObject {
         Ok(wait_group)
     }
 
-    pub fn free(&mut self) -> Result<WaitGroup, UfoLookupErr> {
+    pub fn free(&mut self) -> Result<WaitGroup, UfoInternalErr> {
         let wait_group = crossbeam::sync::WaitGroup::new();
         let core = match self.core.upgrade() {
-            None => return Err(UfoLookupErr::CoreShutdown),
+            None => return Err(UfoInternalErr::CoreShutdown),
             Some(x) => x,
         };
 
