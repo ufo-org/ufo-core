@@ -1,6 +1,6 @@
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::experimental_compat::droplockster;
+use crate::experimental_compat::Droplockster;
 
 #[derive(Debug, PartialEq)]
 pub enum ShouldRun {
@@ -59,7 +59,7 @@ where
             PopulateWorkers::spawn_worker(Arc::clone(self));
         }
 
-        droplockster(state);
+        state.droplockster();
         ShouldRun::Running
     }
 

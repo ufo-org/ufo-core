@@ -20,8 +20,8 @@ use crossbeam::sync::WaitGroup;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use userfaultfd::Uffd;
 
+use crate::experimental_compat::Droplockster;
 use crate::events::{start_qeueue_runner, UfoEvent, UfoEventandTimestamp};
-use crate::experimental_compat::droplockster;
 use crate::once_await::OnceFulfiller;
 use crate::populate_workers::{PopulateWorkers, RequestWorker, ShouldRun};
 use crate::{UfoEventConsumer, UfoEventResult};
@@ -332,6 +332,7 @@ impl UfoCore {
                 start, (pop_end-start) * config.stride, populate_offset.as_ptr_int());
 
             let chunk = UfoChunk::new(&ufo_arc, &ufo, populate_offset, populate_size);
+            ufo.droplockster();
 
             // Before we perform the load ensure that there is capacity
             UfoCore::ensure_capcity(
@@ -342,8 +343,9 @@ impl UfoCore {
             );
 
             // drop the lock before loading so that UFOs can be recursive
-            droplockster(state);
+            state.droplockster();
 
+            let ufo = ufo_arc.read().unwrap();
             let config = &ufo.config;
 
             trace!("spin locking {:?}.{}", ufo.id, chunk.offset());
@@ -396,7 +398,7 @@ impl UfoCore {
             trace!(target: "ufo_core", "chunk saved");
 
             // release the lock before calculating the hash so other workers can proceed
-            droplockster(state);
+            state.droplockster();
 
             if !config.should_try_writeback() {
                 hash_fulfiller.try_init(None);
