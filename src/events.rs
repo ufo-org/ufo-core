@@ -81,6 +81,13 @@ pub enum UfoEvent {
     FreeUfo {
         ufo_id: u64,
 
+        header_size_with_padding: usize,
+        body_size_with_padding: usize,
+        total_size_with_padding: usize,
+
+        intended_header_size: usize,
+        intended_body_size: usize,
+
         memory_freed: usize,
         chunks_freed: usize,
         disk_freed: usize,

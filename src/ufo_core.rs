@@ -524,11 +524,11 @@ impl UfoCore {
                 intended_body_size: config.element_ct() * config.stride(),
                 intended_header_size: config.header_size(),
 
-                read_only: config.read_only(),
-
                 header_size_with_padding: config.header_size_with_padding,
                 body_size_with_padding: config.true_size - config.header_size_with_padding,
                 total_size_with_padding: config.true_size,
+
+                read_only: config.read_only(),
             };
 
             // let header_offset = config.header_size_with_padding - config.header_size;
@@ -620,19 +620,29 @@ impl UfoCore {
                 "mmap upper bound not equal to segment upper bound"
             );
 
+            let config = &ufo.config;
+
             this.uffd
-                .unregister(ufo.mmap.as_ptr().cast(), ufo.config.true_size)?;
+                .unregister(ufo.mmap.as_ptr().cast(), config.true_size)?;
             let start_addr = segment.start.clone();
             state.objects_by_segment.remove_by_start(&start_addr);
 
             let (chunk_memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
-            let header_bytes = ufo.config.header_size_with_padding;
+            let header_bytes = config.header_size_with_padding;
 
             let disk_freed = ufo.writeback_util.used_bytes();
 
             event_sender.send_event(UfoEvent::FreeUfo {
                 ufo_id: ufo_id.0,
-                memory_freed: chunk_memory_freed + header_bytes,
+
+                intended_body_size: config.element_ct() * config.stride(),
+                intended_header_size: config.header_size(),
+
+                header_size_with_padding: config.header_size_with_padding,
+                body_size_with_padding: config.true_size - config.header_size_with_padding,
+                total_size_with_padding: config.true_size,
+
+                memory_freed: chunk_memory_freed,
                 chunks_freed,
                 disk_freed,
             })?;
