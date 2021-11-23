@@ -465,6 +465,7 @@ impl UfoChunk {
         ufo: &UfoObject,
     ) -> std::result::Result<(), UfoInternalErr> {
         if let None = self.length {
+            debug!("Chunk already free {:?}@{}", self.ufo_id(), self.offset().chunk_number());
             return Ok(()); // Already freed
         }
 
@@ -486,12 +487,14 @@ impl UfoChunk {
             .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
 
         let chunk_slice = unsafe {
-            let chunk_ptr = ufo.body_ptr().add(self.offset.offset_from_header());
+            let chunk_ptr:*const u8 = ufo.mmap.as_ptr().add(self.offset.absolute_offset_bytes);
             let chunk_length = self.length.unwrap(/* check at function start*/).get();
-            slice::from_raw_parts(chunk_ptr.cast(), chunk_length)
+            slice::from_raw_parts(chunk_ptr, chunk_length)
         };
 
+        println!("hashing {}", self.offset().chunk_number()) ;
         let calculated_hash = hash_function(chunk_slice);
+        println!("hashed {}", self.offset().chunk_number()) ;
 
         if known_hash != calculated_hash {
             let start = self.offset.as_index_floor();

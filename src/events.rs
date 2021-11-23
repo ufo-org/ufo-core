@@ -89,10 +89,10 @@ pub enum UfoEvent {
 
         intended_header_size: usize,
         intended_body_size: usize,
-        // We send chunk free events at UFO free time, no need for this
-        // memory_freed: usize,
-        // chunks_freed: usize,
-        // disk_freed: usize,
+        
+        memory_freed: usize,
+        chunks_freed: usize,
+        disk_freed: usize,
     },
 
     Shutdown,

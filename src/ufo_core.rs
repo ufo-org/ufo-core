@@ -630,8 +630,8 @@ impl UfoCore {
 
             let config = &ufo.config;
 
-            state.loaded_chunks.drop_ufo_chunks(&ufo)?;
-            ufo.writeback_util.used_bytes();
+            let (memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
+            let disk_freed = ufo.writeback_util.used_bytes();
             debug!(target: "ufo_core", "chunks dropped {:?}", ufo.id);
 
             this.uffd
@@ -651,6 +651,10 @@ impl UfoCore {
                 header_size_with_padding: config.header_size_with_padding,
                 body_size_with_padding: config.true_size - config.header_size_with_padding,
                 total_size_with_padding: config.true_size,
+
+                memory_freed,
+                chunks_freed,
+                disk_freed,
             })?;
             debug!(target: "ufo_core", "sent free event {:?}", ufo.id);
 
