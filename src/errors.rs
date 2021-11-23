@@ -12,6 +12,8 @@ pub enum UfoInternalErr {
     UfoNotFound,
     #[error("Ufo State Error: {0}")]
     UfoStateError(String),
+    #[error("Ufo Allocate Error: {0}")]
+    UfoAllocateError(UfoAllocateErr),
 }
 
 impl<T> From<std::sync::PoisonError<T>> for UfoInternalErr {
@@ -29,6 +31,12 @@ impl<T> From<std::sync::mpsc::SendError<T>> for UfoInternalErr {
 impl<T> From<crossbeam::channel::SendError<T>> for UfoInternalErr {
     fn from(_e: crossbeam::channel::SendError<T>) -> Self {
         UfoInternalErr::CoreBroken("Error when sending messsge to the core".into())
+    }
+}
+
+impl From<UfoAllocateErr> for UfoInternalErr {
+    fn from(e: UfoAllocateErr) -> Self {
+        UfoInternalErr::UfoAllocateError(e)
     }
 }
 

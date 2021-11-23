@@ -65,7 +65,7 @@ impl UfoChunks {
         let ct = chunks
             .par_iter_mut()
             .filter(|c| c.ufo_id() == ufo.id)
-            .map(UfoChunk::mark_freed_notify_listener)
+            .map(|chunk| chunk.mark_freed_notify_listener(ufo))
             .map(|r| r.and(Ok(1)))
             .reduce(|| Ok(0), |a, b| Ok(a? + b?))?;
         self.used_memory = chunks.iter().map(UfoChunk::size_in_page_bytes).sum();
@@ -596,6 +596,7 @@ impl UfoCore {
             event_sender: &UfoEventSender,
             ufo_id: UfoId,
         ) -> anyhow::Result<()> {
+            debug!(target: "ufo_core", "Seeking UFO for free {:?}", ufo_id);
             //TODO: When freeing we need to check all chunks and call the writeback listener as needed
             // but only if there is a writeback function
             let state = &mut *this.get_locked_state()?;
@@ -603,7 +604,7 @@ impl UfoCore {
                 .objects_by_id
                 .remove(&ufo_id)
                 .map(Ok)
-                .unwrap_or_else(|| Err(anyhow::anyhow!("No such Ufo")))?;
+                .unwrap_or_else(|| Err(anyhow::anyhow!("No such Ufo {}", ufo_id.0)))?;
             let ufo = ufo
                 .write()
                 .map_err(|_| anyhow::anyhow!("Broken Ufo Lock"))?;
@@ -629,13 +630,17 @@ impl UfoCore {
 
             let config = &ufo.config;
 
-            this.uffd
-                .unregister(ufo.mmap.as_ptr().cast(), config.true_size)?;
-            let start_addr = segment.start.clone();
-            state.objects_by_segment.remove_by_start(&start_addr);
-
             state.loaded_chunks.drop_ufo_chunks(&ufo)?;
             ufo.writeback_util.used_bytes();
+            debug!(target: "ufo_core", "chunks dropped {:?}", ufo.id);
+
+            this.uffd
+                .unregister(ufo.mmap.as_ptr().cast(), config.true_size)?;
+            debug!(target: "ufo_core", "unregistered from uffd {:?}", ufo.id);
+
+            let start_addr = segment.start.clone();
+            state.objects_by_segment.remove_by_start(&start_addr);
+            debug!(target: "ufo_core", "removed from segment map {:?}", ufo.id);
 
             event_sender.send_event(UfoEvent::FreeUfo {
                 ufo_id: ufo_id.0,
@@ -647,6 +652,9 @@ impl UfoCore {
                 body_size_with_padding: config.true_size - config.header_size_with_padding,
                 total_size_with_padding: config.true_size,
             })?;
+            debug!(target: "ufo_core", "sent free event {:?}", ufo.id);
+
+            info!(target: "ufo_core", "UFO Successfully Freed {:?}", ufo.id);
 
             Ok(())
         }

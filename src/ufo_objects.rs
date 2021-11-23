@@ -460,7 +460,10 @@ impl UfoChunk {
         }
     }
 
-    pub fn mark_freed_notify_listener(&mut self) -> std::result::Result<(), UfoInternalErr> {
+    pub fn mark_freed_notify_listener(
+        &mut self,
+        ufo: &UfoObject,
+    ) -> std::result::Result<(), UfoInternalErr> {
         if let None = self.length {
             return Ok(()); // Already freed
         }
@@ -471,8 +474,8 @@ impl UfoChunk {
             return Ok(());
         }
 
-        let obj = self.object.upgrade().ok_or(UfoInternalErr::UfoNotFound)?;
-        let obj = obj.read()?;
+        // let obj = self.object.upgrade().ok_or(UfoInternalErr::UfoNotFound)?;
+        // let obj = obj.read()?;
 
         // assert!(obj.config.writeback_listener.is_some(), "no listener, use make_freed (requires no lock)");
         // assert!(obj.config.should_try_writeback(), "not performing writeback, no need to call listener");
@@ -483,7 +486,7 @@ impl UfoChunk {
             .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
 
         let chunk_slice = unsafe {
-            let chunk_ptr = obj.body_ptr().add(self.offset.offset_from_header());
+            let chunk_ptr = ufo.body_ptr().add(self.offset.offset_from_header());
             let chunk_length = self.length.unwrap(/* check at function start*/).get();
             slice::from_raw_parts(chunk_ptr.cast(), chunk_length)
         };
@@ -492,8 +495,8 @@ impl UfoChunk {
 
         if known_hash != calculated_hash {
             let start = self.offset.as_index_floor();
-            let end = obj.config.element_ct.min(start + self.size());
-            (obj.config.writeback_listener.as_ref().unwrap())(UfoWriteListenerEvent::Writeback {
+            let end = ufo.config.element_ct.min(start + self.size());
+            (ufo.config.writeback_listener.as_ref().unwrap())(UfoWriteListenerEvent::Writeback {
                 start_idx: start,
                 end_idx: end,
                 data: chunk_slice.as_ptr(),
