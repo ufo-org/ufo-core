@@ -1,5 +1,7 @@
 use std::io::Error;
 
+use crossbeam::sync::WaitGroup;
+
 pub type UfoEventConsumer = dyn Fn(&UfoEventandTimestamp) + Send;
 
 #[repr(C)]
@@ -87,16 +89,19 @@ pub enum UfoEvent {
 
         intended_header_size: usize,
         intended_body_size: usize,
-
-        memory_freed: usize,
-        chunks_freed: usize,
-        disk_freed: usize,
+        // We send chunk free events at UFO free time, no need for this
+        // memory_freed: usize,
+        // chunks_freed: usize,
+        // disk_freed: usize,
     },
 
     Shutdown,
 }
 
-pub(crate) fn start_qeueue_runner<Recv>(reciever: Recv) -> Result<(), Error>
+pub(crate) fn start_qeueue_runner<Recv>(
+    reciever: Recv,
+    shutdown_sync: WaitGroup,
+) -> Result<(), Error>
 where
     Recv: 'static + Send + Fn() -> UfoEventResult,
 {
@@ -154,5 +159,6 @@ where
                 }
             }
         })?;
+    std::mem::drop(shutdown_sync);
     Ok(())
 }

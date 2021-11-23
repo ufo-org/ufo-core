@@ -161,11 +161,13 @@ impl UfoEventSender {
 
 pub struct UfoCore {
     uffd: Uffd,
-    pub config: Arc<UfoCoreConfig>,
-
-    pub msg_send: Sender<UfoInstanceMsg>,
     state: Mutex<UfoCoreState>,
-    ufo_event_queue: Mutex<UfoEventSender>,
+
+    pub config: Arc<UfoCoreConfig>,
+    pub msg_send: Sender<UfoInstanceMsg>,
+
+    ufo_event_sender: Mutex<UfoEventSender>,
+    event_qeueue_shutdown_sync: Mutex<Option<WaitGroup>>,
 }
 
 impl UfoCore {
@@ -198,14 +200,19 @@ impl UfoCore {
         };
         let msg_thread_sender = sender.clone();
 
-        start_qeueue_runner(move || reciever.recv().unwrap_or(UfoEventResult::RecvErr))?;
+        let event_qeueue_shutdown_sync = WaitGroup::new();
+        start_qeueue_runner(
+            move || reciever.recv().unwrap_or(UfoEventResult::RecvErr),
+            event_qeueue_shutdown_sync.clone(),
+        )?;
 
         let core = Arc::new(UfoCore {
             uffd,
             config,
             msg_send: send,
             state,
-            ufo_event_queue: Mutex::new(sender),
+            ufo_event_sender: Mutex::new(sender),
+            event_qeueue_shutdown_sync: Mutex::new(Some(event_qeueue_shutdown_sync)),
         });
 
         trace!(target: "ufo_core", "starting threads");
@@ -282,7 +289,7 @@ impl UfoCore {
         &self,
         callback: Option<Box<UfoEventConsumer>>,
     ) -> Result<(), UfoInternalErr> {
-        self.ufo_event_queue.lock()?.new_callback(callback)
+        self.ufo_event_sender.lock()?.new_callback(callback)
     }
 
     fn populate_loop(this: Arc<UfoCore>, request_worker: &dyn RequestWorker) {
@@ -292,7 +299,7 @@ impl UfoCore {
             buffer: &mut UfoWriteBuffer,
             addr: *mut c_void,
         ) -> Result<(), UfoPopulateError> {
-            let event_queue = { core.ufo_event_queue.lock()?.clone() };
+            let event_queue = { core.ufo_event_sender.lock()?.clone() };
 
             // fn droplockster<T>(_: T){}
             let mut state = core.get_locked_state().unwrap();
@@ -627,10 +634,8 @@ impl UfoCore {
             let start_addr = segment.start.clone();
             state.objects_by_segment.remove_by_start(&start_addr);
 
-            let (chunk_memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
-            let header_bytes = config.header_size_with_padding;
-
-            let disk_freed = ufo.writeback_util.used_bytes();
+            state.loaded_chunks.drop_ufo_chunks(&ufo)?;
+            ufo.writeback_util.used_bytes();
 
             event_sender.send_event(UfoEvent::FreeUfo {
                 ufo_id: ufo_id.0,
@@ -641,10 +646,6 @@ impl UfoCore {
                 header_size_with_padding: config.header_size_with_padding,
                 body_size_with_padding: config.true_size - config.header_size_with_padding,
                 total_size_with_padding: config.true_size,
-
-                memory_freed: chunk_memory_freed,
-                chunks_freed,
-                disk_freed,
             })?;
 
             Ok(())
@@ -667,6 +668,15 @@ impl UfoCore {
             event_sender
                 .send_event(UfoEvent::Shutdown)
                 .expect("event queue broken at shutdown");
+
+            if let Some(sync) = this
+                .event_qeueue_shutdown_sync
+                .lock()
+                .expect("event queue sync lock broken")
+                .take()
+            {
+                sync.wait(); // wait for the shutdown event to be processed
+            }
         }
 
         loop {
@@ -721,12 +731,6 @@ impl UfoCore {
                 );
             }
         }
-
-        self.ufo_event_queue
-            .lock()
-            .unwrap()
-            .send_event(UfoEvent::Shutdown)
-            .unwrap();
 
         trace!(target: "ufo_core", "close uffd handle: {}", close_result);
     }
