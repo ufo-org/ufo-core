@@ -14,7 +14,6 @@ pub enum UfoUnloadDisposition {
     ExistingDirty,
 }
 
-
 pub(crate) enum UfoEventResult {
     RecvErr,
     NewCallback {
@@ -72,6 +71,7 @@ pub enum UfoEvent {
     UfoReset {
         ufo_id: u64,
         memory_freed: usize,
+        chunks_freed: usize,
         disk_freed: usize,
     },
 
@@ -82,6 +82,7 @@ pub enum UfoEvent {
         ufo_id: u64,
 
         memory_freed: usize,
+        chunks_freed: usize,
         disk_freed: usize,
     },
 

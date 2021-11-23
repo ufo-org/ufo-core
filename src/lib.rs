@@ -31,16 +31,15 @@ pub type UfoPopulateFn =
 
 #[repr(C)]
 pub enum UfoWriteListenerEvent {
-    Writeback{
+    Writeback {
         start_idx: usize,
         end_idx: usize,
         data: *const u8,
     },
-    Reset
+    Reset,
 }
 
 pub type UfoWritebackListenerFn = dyn Fn(UfoWriteListenerEvent) + Sync + Send;
-
 
 static PAGE_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

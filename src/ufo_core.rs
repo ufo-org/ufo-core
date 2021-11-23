@@ -17,7 +17,7 @@ use log::{debug, info, trace, warn};
 use btree_interval_map::IntervalMap;
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::sync::WaitGroup;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use userfaultfd::Uffd;
 
 use crate::events::{start_qeueue_runner, UfoEvent, UfoEventandTimestamp};
@@ -58,20 +58,19 @@ impl UfoChunks {
         self.loaded_chunks.push_back(chunk);
     }
 
-    fn drop_ufo_chunks(&mut self, ufo: &UfoObject) -> Result<usize, UfoInternalErr> {
+    fn drop_ufo_chunks(&mut self, ufo: &UfoObject) -> Result<(usize, usize), UfoInternalErr> {
         let before = self.used_memory;
         let chunks = &mut self.loaded_chunks;
 
-
-        chunks
-            .iter_mut()
+        let ct = chunks
+            .par_iter_mut()
             .filter(|c| c.ufo_id() == ufo.id)
             .map(UfoChunk::mark_freed_notify_listener)
-            .reduce(Result::and)
-            .unwrap_or(Ok(()))?;
+            .map(|r| r.and(Ok(1)))
+            .reduce(|| Ok(0), |a, b| Ok(a? + b?))?;
         self.used_memory = chunks.iter().map(UfoChunk::size_in_page_bytes).sum();
 
-        Ok(before - self.used_memory)
+        Ok((before - self.used_memory, ct))
     }
 
     fn free_until_low_water_mark(
@@ -573,12 +572,13 @@ impl UfoCore {
             debug!(target: "ufo_core", "resetting {:?}", ufo.id);
 
             let disk_freed = ufo.reset_internal()?;
-            let memory_freed = state.loaded_chunks.drop_ufo_chunks(ufo)?;
+            let (memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(ufo)?;
 
             event_sender.send_event(UfoEvent::UfoReset {
                 ufo_id: ufo_id.0,
                 disk_freed,
                 memory_freed,
+                chunks_freed,
             })?;
 
             Ok(())
@@ -625,7 +625,7 @@ impl UfoCore {
             let start_addr = segment.start.clone();
             state.objects_by_segment.remove_by_start(&start_addr);
 
-            let chunk_memory_freed = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
+            let (chunk_memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
             let header_bytes = ufo.config.header_size_with_padding;
 
             let disk_freed = ufo.writeback_util.used_bytes();
@@ -633,6 +633,7 @@ impl UfoCore {
             event_sender.send_event(UfoEvent::FreeUfo {
                 ufo_id: ufo_id.0,
                 memory_freed: chunk_memory_freed + header_bytes,
+                chunks_freed,
                 disk_freed,
             })?;
 
@@ -653,6 +654,9 @@ impl UfoCore {
             keys.iter()
                 .for_each(|k| free_impl(this, event_sender, *k).expect("err on free"));
             populate_pool.shutdown();
+            event_sender
+                .send_event(UfoEvent::Shutdown)
+                .expect("event queue broken at shutdown");
         }
 
         loop {

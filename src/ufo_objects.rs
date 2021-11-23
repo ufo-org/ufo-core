@@ -415,10 +415,10 @@ impl UfoChunk {
                                     .min(obj.config.element_ct());
                                 let ptr = pivot.as_ptr();
                                 if let Some(listener) = &obj.config.writeback_listener {
-                                    listener(UfoWriteListenerEvent::Writeback{
+                                    listener(UfoWriteListenerEvent::Writeback {
                                         start_idx: start,
                                         end_idx: end,
-                                        data: ptr
+                                        data: ptr,
                                     });
                                 }
                             },
@@ -464,25 +464,26 @@ impl UfoChunk {
         if let None = self.length {
             return Ok(()); // Already freed
         }
-        
+
         if !self.has_listener {
             // No listener, just drop it
             self.length = None;
             return Ok(());
         }
 
-        let obj = self.object.upgrade()
-            .ok_or(UfoInternalErr::UfoNotFound)?;
-        let obj =  obj.read()?;
+        let obj = self.object.upgrade().ok_or(UfoInternalErr::UfoNotFound)?;
+        let obj = obj.read()?;
 
         // assert!(obj.config.writeback_listener.is_some(), "no listener, use make_freed (requires no lock)");
         // assert!(obj.config.should_try_writeback(), "not performing writeback, no need to call listener");
 
-        let known_hash = self.hash.get()
+        let known_hash = self
+            .hash
+            .get()
             .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
-        
+
         let chunk_slice = unsafe {
-            let chunk_ptr =  obj.body_ptr().add(self.offset.offset_from_header());
+            let chunk_ptr = obj.body_ptr().add(self.offset.offset_from_header());
             let chunk_length = self.length.unwrap(/* check at function start*/).get();
             slice::from_raw_parts(chunk_ptr.cast(), chunk_length)
         };
@@ -491,12 +492,11 @@ impl UfoChunk {
 
         if known_hash != calculated_hash {
             let start = self.offset.as_index_floor();
-            let end = obj.config.element_ct
-                .min(start + self.size() );
-            (obj.config.writeback_listener.as_ref().unwrap())(UfoWriteListenerEvent::Writeback{
+            let end = obj.config.element_ct.min(start + self.size());
+            (obj.config.writeback_listener.as_ref().unwrap())(UfoWriteListenerEvent::Writeback {
                 start_idx: start,
                 end_idx: end,
-                data: chunk_slice.as_ptr()
+                data: chunk_slice.as_ptr(),
             });
         }
 
@@ -757,7 +757,7 @@ impl UfoObject {
             ))?;
         }
         let writeback_bytes_freed = self.writeback_util.reset()?;
-        if let Some(listener) =  &self.config.writeback_listener {
+        if let Some(listener) = &self.config.writeback_listener {
             listener(UfoWriteListenerEvent::Reset);
         }
         Ok(writeback_bytes_freed)
