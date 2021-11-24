@@ -11,17 +11,17 @@ pub trait Mmap: Sized {
 
     fn length(&self) -> usize;
 
-    fn with_slice<F, V>(&self, offset: usize, length: usize, f: F) -> Option<V>
+    fn with_slice<F, V>(&self, offset: usize, length: usize, f: F) -> V
     where
         F: FnOnce(&[u8]) -> V,
     {
         let end = offset + length;
 
         if end > self.length() {
-            None
+            f(&[])
         } else {
             let arr = unsafe { std::slice::from_raw_parts(self.as_ptr().add(offset), length) };
-            Some(f(arr))
+            f(arr)
         }
     }
 

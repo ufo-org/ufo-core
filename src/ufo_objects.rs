@@ -45,14 +45,11 @@ pub struct UfoIdGen {
 type DataHash = blake3::Hash;
 
 pub fn hash_function(data: &[u8]) -> DataHash {
-
     #[cfg(feature = "parallel_hashing")]
     {
         if data.len() > 128 * 1024 {
             // On large blocks we can get significant gains from parallelism
-            blake3::Hasher::new()
-                .update_rayon(data)
-                .finalize()
+            blake3::Hasher::new().update_rayon(data).finalize()
         } else {
             blake3::hash(data)
         }
@@ -303,13 +300,13 @@ impl ChunkFreer {
     }
 }
 
-pub(self) struct SizeInPages(usize);
+// pub(self) struct SizeInPages(usize);
 
-impl SizeInPages {
-    fn size_as_multiple_of_pages(&self) -> usize {
-        self.0.next_multiple_of(&crate::get_page_size())
-    }
-}
+// impl SizeInPages {
+//     fn size_as_multiple_of_pages(&self) -> usize {
+//         self.0.next_multiple_of(&crate::get_page_size())
+//     }
+// }
 
 pub(crate) struct UfoChunk {
     ufo_id: UfoId,
@@ -327,6 +324,7 @@ impl UfoChunk {
         offset: UfoOffset,
         length: usize,
     ) -> UfoChunk {
+        assert!(length > 0);
         assert!(
             offset.absolute_offset() + length <= object.mmap.length(),
             "{} + {} > {}",
@@ -361,7 +359,9 @@ impl UfoChunk {
             (Some(length), Some(obj)) => {
                 let length_bytes = length.get();
                 let length_page_multiple = self.size_in_page_bytes();
-                let obj = obj.read().unwrap();
+                let obj = obj
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("UFO {:?} lock poisoned", self.ufo_id()))?;
 
                 trace!(target: "ufo_object", "free chunk {:?}@{} ({}b / {}pageBytes)",
                     self.ufo_id, self.offset(), length_bytes, length_page_multiple
@@ -415,7 +415,7 @@ impl UfoChunk {
                 let mut was_on_disk = false;
                 let mut written_to_disk = false;
                 if let Some(hash) = self.hash.get() {
-                    let calculated_hash = pivot.with_slice(0, length_bytes, hash_function).unwrap(); // it should never be possible for this to fail
+                    let calculated_hash = pivot.with_slice(0, length_bytes, hash_function);
                     trace!(target: "ufo_object", "{:?}@{} writeback hash matches {}", self.ufo_id, self.offset(), hash == &calculated_hash);
                     if hash != &calculated_hash {
                         let (_, rb): ((), Result<()>) = rayon::join(
@@ -433,11 +433,10 @@ impl UfoChunk {
                                 }
                             },
                             || {
-                                let writeback_action_taken = pivot
-                                    .with_slice(0, length_bytes, |data| {
+                                let writeback_action_taken =
+                                    pivot.with_slice(0, length_bytes, |data| {
                                         obj.writeback_util.writeback(&self.offset, data)
-                                    })
-                                    .unwrap()?;
+                                    })?;
                                 was_on_disk = writeback_action_taken.was_on_disk();
                                 written_to_disk = true;
                                 Ok(())
@@ -474,7 +473,10 @@ impl UfoChunk {
         &mut self,
         ufo: &UfoObject,
     ) -> std::result::Result<(), UfoInternalErr> {
-        if let None = self.length {
+        let length;
+        if let Some(l) = self.length {
+            length = l;
+        } else {
             debug!(
                 "Chunk already free {:?}@{}",
                 self.ufo_id(),
@@ -489,6 +491,10 @@ impl UfoChunk {
             return Ok(());
         }
 
+        let writeback_listener = ufo.config.writeback_listener.as_ref().ok_or_else(|| {
+            UfoInternalErr::UfoStateError("cannot has_listener without a listener!".to_string())
+        })?;
+
         // let obj = self.object.upgrade().ok_or(UfoInternalErr::UfoNotFound)?;
         // let obj = obj.read()?;
 
@@ -502,7 +508,7 @@ impl UfoChunk {
 
         let chunk_slice = unsafe {
             let chunk_ptr: *const u8 = ufo.mmap.as_ptr().add(self.offset.absolute_offset_bytes);
-            let chunk_length = self.length.unwrap(/* check at function start*/).get();
+            let chunk_length = length.get();
             slice::from_raw_parts(chunk_ptr, chunk_length)
         };
 
@@ -513,7 +519,7 @@ impl UfoChunk {
         if known_hash != calculated_hash {
             let start = self.offset.as_index_floor();
             let end = ufo.config.element_ct.min(start + self.size());
-            (ufo.config.writeback_listener.as_ref().unwrap())(UfoWriteListenerEvent::Writeback {
+            (writeback_listener)(UfoWriteListenerEvent::Writeback {
                 start_idx: start,
                 end_idx: end,
                 data: chunk_slice.as_ptr(),
@@ -532,12 +538,12 @@ impl UfoChunk {
         self.length.map(NonZeroUsize::get).unwrap_or(0)
     }
 
-    pub(self) fn size_in_pages(&self) -> SizeInPages {
-        SizeInPages(self.size())
-    }
+    // pub(self) fn size_in_pages(&self) -> SizeInPages {
+    //     SizeInPages(self.size())
+    // }
 
     pub(crate) fn size_in_page_bytes(&self) -> usize {
-        self.size_in_pages().size_as_multiple_of_pages()
+        self.size().next_multiple_of(&crate::get_page_size())
     }
 }
 
