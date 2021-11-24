@@ -19,6 +19,8 @@ use crossbeam::channel::{Receiver, Sender};
 use crossbeam::sync::WaitGroup;
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use semver::Version;
+use uname::uname;
 use userfaultfd::Uffd;
 
 use crate::events::{start_qeueue_runner, UfoEvent, UfoEventandTimestamp};
@@ -181,6 +183,14 @@ pub struct UfoCore {
 
 impl UfoCore {
     pub fn new(config: UfoCoreConfig) -> Result<Arc<UfoCore>, std::io::Error> {
+        let kernel_version = uname()?;
+        let kernel_version = Version::parse(&kernel_version.release).unwrap();
+        assert!(
+            kernel_version.major > 5 || (kernel_version.major == 5 && kernel_version.minor >= 7),
+            "Minimum kernel version 5.7, found {}",
+            kernel_version
+        );
+
         // If this fails then there is nothing we should even try to do about it honestly
         let uffd = userfaultfd::UffdBuilder::new()
             .close_on_exec(true)
@@ -254,7 +264,7 @@ impl UfoCore {
 
     fn get_locked_state(&self) -> anyhow::Result<MutexGuard<UfoCoreState>> {
         match self.state.lock() {
-            Err(_) => Err(anyhow::Error::msg("broken lock")),
+            Err(_) => Err(anyhow::Error::msg("broken core lock")),
             Ok(l) => Ok(l),
         }
     }

@@ -1,6 +1,7 @@
 use core::slice;
 use std::io::Error;
 use std::num::NonZeroUsize;
+use std::panic;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc, RwLock, RwLockReadGuard, Weak,
