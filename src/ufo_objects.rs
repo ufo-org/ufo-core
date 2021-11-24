@@ -45,12 +45,21 @@ pub struct UfoIdGen {
 type DataHash = blake3::Hash;
 
 pub fn hash_function(data: &[u8]) -> DataHash {
-    if data.len() > 128 * 1024 {
-        // On large blocks we can get significant gains from parallelism
-        blake3::Hasher::new()
-            .update_with_join::<blake3::join::RayonJoin>(data)
-            .finalize()
-    } else {
+
+    #[cfg(feature = "parallel_hashing")]
+    {
+        if data.len() > 128 * 1024 {
+            // On large blocks we can get significant gains from parallelism
+            blake3::Hasher::new()
+                .update_rayon(data)
+                .finalize()
+        } else {
+            blake3::hash(data)
+        }
+    }
+
+    #[cfg(not(feature = "parallel_hashing"))]
+    {
         blake3::hash(data)
     }
 }
@@ -239,9 +248,9 @@ impl std::fmt::Display for UfoOffset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(UfoOffset {}/{})",
+            "(UfoOffset {}@{})",
+            self.chunk_number(),
             self.absolute_offset(),
-            self.chunk_number()
         )
     }
 }
@@ -355,7 +364,7 @@ impl UfoChunk {
                 let obj = obj.read().unwrap();
 
                 trace!(target: "ufo_object", "free chunk {:?}@{} ({}b / {}pageBytes)",
-                    self.ufo_id, self.offset.absolute_offset() , length_bytes, length_page_multiple
+                    self.ufo_id, self.offset(), length_bytes, length_page_multiple
                 );
 
                 if !obj.config.should_try_writeback() {
@@ -383,11 +392,12 @@ impl UfoChunk {
                 // we check the value of the page after the remap because the remap
                 //  is atomic and will let us read cleanly in the face of racing writers
                 let chunk_number = self.offset.chunk_number();
-                trace!("try to uncontended-lock {:?}.{}", obj.id, self.offset());
+                debug!("try to uncontended-lock {:?}.{}", obj.id, self.offset());
                 let chunk_lock = obj
                     .writeback_util
                     .chunk_locks
                     .lock_uncontended(chunk_number)?;
+                trace!("locked {:?}@{}", obj.id, self.offset());
                 unsafe {
                     anyhow::ensure!(length_page_multiple <= pivot.length(), "Pivot too small");
                     let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
@@ -399,14 +409,14 @@ impl UfoChunk {
                         libc::MREMAP_FIXED | libc::MREMAP_MAYMOVE | libc::MREMAP_DONTUNMAP,
                         pivot_ptr,
                     ))?;
-                    trace!(target: "ufo_object", "{:?} mremaped data to pivot", self.ufo_id);
+                    trace!(target: "ufo_object", "{:?}@{} mremaped data to pivot", self.ufo_id, self.offset());
                 }
 
                 let mut was_on_disk = false;
                 let mut written_to_disk = false;
                 if let Some(hash) = self.hash.get() {
                     let calculated_hash = pivot.with_slice(0, length_bytes, hash_function).unwrap(); // it should never be possible for this to fail
-                    trace!(target: "ufo_object", "writeback hash matches {}", hash == &calculated_hash);
+                    trace!(target: "ufo_object", "{:?}@{} writeback hash matches {}", self.ufo_id, self.offset(), hash == &calculated_hash);
                     if hash != &calculated_hash {
                         let (_, rb): ((), Result<()>) = rayon::join(
                             || {
@@ -452,7 +462,7 @@ impl UfoChunk {
                     .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
 
                 self.length = None;
-                trace!("unlock free {:?}.{}", obj.id, self.offset());
+                trace!("unlock free {:?}@{}", obj.id, self.offset());
                 chunk_lock.unlock();
                 Ok(length_bytes)
             }

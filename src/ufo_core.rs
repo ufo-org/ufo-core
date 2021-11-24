@@ -17,6 +17,7 @@ use log::{debug, info, trace, warn};
 use btree_interval_map::IntervalMap;
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::sync::WaitGroup;
+use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use userfaultfd::Uffd;
 
@@ -96,6 +97,14 @@ impl UfoChunks {
                 }
             }
         }
+
+        debug!(target: "ufo_core", "Freeing chunks {}", {
+            let names  = to_free.iter()
+                .map(|c| format!("{:?}@{}", c.ufo_id(), c.offset().chunk_number()));
+            // currently an unstable feature in the std lib, use itertools
+            Itertools::intersperse(names, ", ".to_string())
+                .collect::<String>()
+        });
 
         let freed_memory = to_free
             .into_par_iter()
@@ -332,7 +341,8 @@ impl UfoCore {
                 start, (pop_end-start) * config.stride, populate_offset.as_ptr_int());
 
             let chunk = UfoChunk::new(&ufo_arc, &ufo, populate_offset, populate_size);
-            ufo.droplockster();
+            // shouldn't need to drop this since read is a shared lock
+            // ufo.droplockster();
 
             // Before we perform the load ensure that there is capacity
             UfoCore::ensure_capcity(
@@ -345,7 +355,7 @@ impl UfoCore {
             // drop the lock before loading so that UFOs can be recursive
             state.droplockster();
 
-            let ufo = ufo_arc.read().unwrap();
+            // let ufo = ufo_arc.read().unwrap();
             let config = &ufo.config;
 
             trace!("spin locking {:?}.{}", ufo.id, chunk.offset());
