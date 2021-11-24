@@ -1,6 +1,7 @@
 use std::io::Error;
 
 use crossbeam::sync::WaitGroup;
+use log::{info, trace};
 
 pub type UfoEventConsumer = dyn Fn(&UfoEventandTimestamp) + Send;
 
@@ -89,7 +90,7 @@ pub enum UfoEvent {
 
         intended_header_size: usize,
         intended_body_size: usize,
-        
+
         memory_freed: usize,
         chunks_freed: usize,
         disk_freed: usize,
@@ -125,6 +126,9 @@ where
                                 timestamp_nanos,
                                 event: UfoEvent::NewCallbackAck,
                             });
+                            trace!(target: "ufo_core", "New ufo event listener");
+                        } else {
+                            trace!(target: "ufo_core", "Null ufo event listener");
                         }
                         callback = cb;
                     }
@@ -140,8 +144,10 @@ where
                         ),
                         Some(cb),
                     ) => {
+                        trace!(target: "ufo_core", "Sending shutdown event to listener");
                         cb(&msg);
-                        return;
+                        info!(target: "ufo_core", "Ufo event listener loop shutting down");
+                        break;
                     }
                     // Shutdown with no active callback
                     (
@@ -150,15 +156,18 @@ where
                             ..
                         }),
                         _,
-                    ) => return,
+                    ) => {
+                        info!(target: "ufo_core", "Ufo event lsitener loop shutting down");
+                        break;
+                    }
                     // Normal event
                     (UfoEventResult::Event(msg), Some(cb)) => cb(&msg),
 
-                    (UfoEventResult::RecvErr, _) => return, // hard shutdown
+                    (UfoEventResult::RecvErr, _) => break, // hard shutdown
                     _ => { /* NOP */ }
                 }
             }
+            std::mem::drop(shutdown_sync);
         })?;
-    std::mem::drop(shutdown_sync);
     Ok(())
 }
