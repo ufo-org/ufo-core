@@ -1,7 +1,9 @@
-use std::io::Error;
+use std::{io::Error, time::Instant};
 
-use crossbeam::sync::WaitGroup;
+use crossbeam::{channel::Sender, sync::WaitGroup};
 use log::{info, trace};
+
+use crate::UfoInternalErr;
 
 pub type UfoEventConsumer = dyn Fn(&UfoEventandTimestamp) + Send;
 
@@ -97,6 +99,51 @@ pub enum UfoEvent {
     },
 
     Shutdown,
+}
+
+#[derive(Clone)]
+pub(crate) struct UfoEventSender {
+    zero_time: Instant,
+    sender: Sender<UfoEventResult>,
+}
+
+impl UfoEventSender {
+    pub fn new() -> Result<(Self, WaitGroup), std::io::Error> {
+        let (sender, reciever) = crossbeam::channel::unbounded();
+
+        let event_qeueue_shutdown_sync = WaitGroup::new();
+        start_qeueue_runner(
+            move || reciever.recv().unwrap_or(UfoEventResult::RecvErr),
+            event_qeueue_shutdown_sync.clone(),
+        )?;
+
+        Ok((
+            UfoEventSender {
+                zero_time: std::time::Instant::now(),
+                sender,
+            },
+            event_qeueue_shutdown_sync,
+        ))
+    }
+
+    pub fn new_callback(
+        &self,
+        callback: Option<Box<UfoEventConsumer>>,
+    ) -> Result<(), UfoInternalErr> {
+        Ok(self.sender.send(UfoEventResult::NewCallback {
+            callback,
+            timestamp_nanos: self.zero_time.elapsed().as_nanos() as u64,
+        })?)
+    }
+
+    pub fn send_event(&self, event: UfoEvent) -> Result<(), UfoInternalErr> {
+        Ok(self
+            .sender
+            .send(UfoEventResult::Event(UfoEventandTimestamp {
+                timestamp_nanos: self.zero_time.elapsed().as_nanos() as u64,
+                event,
+            }))?)
+    }
 }
 
 pub(crate) fn start_qeueue_runner<Recv>(
