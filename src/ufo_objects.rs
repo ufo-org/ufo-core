@@ -13,7 +13,7 @@ use num::Integer;
 
 use log::{debug, trace};
 
-use crate::bitwise_spinlock::Bitlock;
+use crate::bitwise_spinlock::{BitGuard, Bitlock};
 use crate::events::{UfoEvent, UfoUnloadDisposition};
 use crate::once_await::OnceAwait;
 use crate::once_await::OnceFulfiller;
@@ -111,7 +111,7 @@ pub struct UfoObjectConfig {
     pub(crate) stride: usize,
     pub(crate) elements_loaded_at_once: usize,
     pub(crate) element_ct: usize,
-    pub(crate) true_size: usize,
+    pub(crate) true_size_with_padding: usize,
     pub(crate) read_only: bool,
 }
 
@@ -132,6 +132,9 @@ impl UfoObjectConfig {
     pub fn read_only(&self) -> bool {
         self.read_only
     }
+    pub fn body_size(&self) -> usize{
+        self.element_ct * self.stride
+    }
 }
 
 impl UfoObjectConfig {
@@ -143,7 +146,7 @@ impl UfoObjectConfig {
         let header_size_with_padding = (params.header_size as usize).next_multiple_of(&page_size);
         let body_size_with_padding =
             (params.stride * params.element_ct).next_multiple_of(&page_size);
-        let true_size = header_size_with_padding + body_size_with_padding;
+        let true_size_with_padding = header_size_with_padding + body_size_with_padding;
 
         /* loading quanta */
         let min_load_bytes = num::integer::lcm(page_size, params.stride * min_load_ct);
@@ -156,7 +159,7 @@ impl UfoObjectConfig {
             read_only: params.read_only,
 
             header_size_with_padding,
-            true_size,
+            true_size_with_padding,
 
             elements_loaded_at_once,
             element_ct: params.element_ct,
@@ -176,7 +179,7 @@ pub(crate) struct UfoOffset {
     base_addr: usize,
     chunk_number: usize,
     stride: usize,
-    header_bytes: usize,
+    header_bytes_with_padding: usize,
     absolute_offset_bytes: usize,
 }
 
@@ -187,14 +190,14 @@ impl UfoOffset {
         let absolute_offset_bytes = addr
             .checked_sub(base_addr)
             .unwrap_or_else(|| panic!("Addr less than base {} < {}", addr, base_addr));
-        let header_bytes = ufo.config.header_size_with_padding;
+        let header_bytes_with_padding = ufo.config.header_size_with_padding;
 
         assert!(
-            header_bytes <= absolute_offset_bytes,
+            header_bytes_with_padding <= absolute_offset_bytes,
             "Cannot offset into the header"
         );
 
-        let offset_from_header = absolute_offset_bytes - header_bytes;
+        let offset_from_header = absolute_offset_bytes - header_bytes_with_padding;
         let bytes_loaded_at_once = ufo.config.elements_loaded_at_once * ufo.config.stride;
         let chunk_number = div_floor(offset_from_header, bytes_loaded_at_once);
         assert!(chunk_number * bytes_loaded_at_once <= offset_from_header);
@@ -204,7 +207,7 @@ impl UfoOffset {
             base_addr,
             chunk_number,
             stride: ufo.config.stride,
-            header_bytes,
+            header_bytes_with_padding,
             absolute_offset_bytes,
         }
     }
@@ -213,8 +216,8 @@ impl UfoOffset {
         self.absolute_offset_bytes
     }
 
-    pub fn offset_from_header(&self) -> usize {
-        self.absolute_offset_bytes - self.header_bytes
+    pub fn body_offset(&self) -> usize {
+        self.absolute_offset_bytes - self.header_bytes_with_padding
     }
 
     pub fn as_ptr_int(&self) -> usize {
@@ -222,14 +225,12 @@ impl UfoOffset {
     }
 
     pub fn as_index_floor(&self) -> usize {
-        div_floor(self.offset_from_header(), self.stride)
+        div_floor(self.body_offset(), self.stride)
     }
 
-    pub fn down_to_nearest_n_relative_to_header(&self, nearest: usize) -> UfoOffset {
-        let offset = self.offset_from_header();
-        let offset = offset.prev_multiple_of(&nearest);
-
-        let absolute_offset_bytes = self.header_bytes + offset;
+    pub fn down_to_nearest_n_relative_to_body(&self, nearest: usize) -> UfoOffset {
+        let offset = self.body_offset().prev_multiple_of(&nearest);
+        let absolute_offset_bytes = self.header_bytes_with_padding + offset;
 
         UfoOffset {
             absolute_offset_bytes,
@@ -389,6 +390,12 @@ impl UfoChunk {
                     return Ok(length_page_multiple);
                 }
 
+                // must get the hash before we try to lock the chunk
+                // this guarantees that the lock on the chunk from populate will be clear
+                debug!(target: "ufo_object", "{:?}@{} retrieve hash", self.ufo_id, self.offset());
+                let stored_hash = self.hash.get();
+                trace!(target: "ufo_object", "{:?}@{} hash retrieved", self.ufo_id, self.offset());
+
                 // We first remap the pages from the UFO into the file backing
                 // we check the value of the page after the remap because the remap
                 //  is atomic and will let us read cleanly in the face of racing writers
@@ -397,7 +404,8 @@ impl UfoChunk {
                 let chunk_lock = obj
                     .writeback_util
                     .chunk_locks
-                    .lock_uncontended(chunk_number)?;
+                    .lock_uncontended(chunk_number)
+                    .unwrap();
                 trace!("locked {:?}@{}", obj.id, self.offset());
                 unsafe {
                     anyhow::ensure!(length_page_multiple <= pivot.length(), "Pivot too small");
@@ -415,7 +423,8 @@ impl UfoChunk {
 
                 let mut was_on_disk = false;
                 let mut written_to_disk = false;
-                if let Some(hash) = self.hash.get() {
+
+                if let Some(hash) = stored_hash {
                     let calculated_hash = pivot.with_slice(0, length_bytes, hash_function);
                     trace!(target: "ufo_object", "{:?}@{} writeback hash matches {}", self.ufo_id, self.offset(), hash == &calculated_hash);
                     if hash != &calculated_hash {
@@ -464,7 +473,8 @@ impl UfoChunk {
                 self.length = None;
                 trace!("unlock free {:?}@{}", obj.id, self.offset());
                 chunk_lock.unlock();
-                Ok(length_bytes)
+                // return page multiple of bytes since memory is consumed by the page
+                Ok(length_page_multiple)
             }
             _ => Ok(0),
         }
@@ -555,7 +565,8 @@ pub(crate) struct UfoFileWriteback {
     final_chunk_size_page_aligned: usize,
     pub(crate) chunk_locks: Bitlock,
     chunk_size: usize,
-    total_bytes: usize,
+    total_bytes_with_padding: usize,
+    body_bytes: usize,
     header_bytes: usize,
     // bitlock_bytes: usize,
     // bitmap_bytes: usize,
@@ -597,7 +608,7 @@ impl UfoFileWriteback {
 
         let chunk_size = cfg.elements_loaded_at_once * cfg.stride;
         let final_chunk_size_page_aligned =
-            (match (cfg.true_size - cfg.header_size_with_padding) % chunk_size {
+            (match (cfg.true_size_with_padding - cfg.header_size_with_padding) % chunk_size {
                 0 => chunk_size,
                 x => x,
             })
@@ -615,14 +626,14 @@ impl UfoFileWriteback {
         // round the mmap up to the nearest chunk size
         // when loading we need to give back chunks this large so even though no useful user data may
         // be in the last chunk we still need to have this available for in the readback chunk
-        let data_bytes = (cfg.element_ct * cfg.stride).next_multiple_of(&chunk_size);
-        let total_bytes = bitmap_bytes + bitlock_bytes + data_bytes;
+        let data_bytes_with_padding = (cfg.element_ct * cfg.stride).next_multiple_of(&chunk_size);
+        let total_bytes_with_padding = bitmap_bytes + bitlock_bytes + data_bytes_with_padding;
 
         let temp_file =
-            unsafe { OpenFile::temp(core.config.writeback_temp_path.as_str(), total_bytes) }?;
+            unsafe { OpenFile::temp(core.config.writeback_temp_path.as_str(), total_bytes_with_padding) }?;
 
         let mmap = MmapFd::new(
-            total_bytes,
+            total_bytes_with_padding,
             &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
             &[MmapFlag::Shared],
             None,
@@ -639,7 +650,8 @@ impl UfoFileWriteback {
             chunk_locks,
             final_chunk_size_page_aligned,
             mmap,
-            total_bytes,
+            total_bytes_with_padding,
+            body_bytes: cfg.element_ct * cfg.stride,
             header_bytes: bitmap_bytes + bitlock_bytes,
         })
     }
@@ -650,7 +662,6 @@ impl UfoFileWriteback {
 
         let bitmap_ptr = self.mmap.as_ptr();
         let mut sum = 0;
-        // todo!("adjust the size of the last chunk in reporting (also round up to the page like on writeback)");
         for x in 0..chunk_ct {
             let byte = x >> 3;
             let bit = x & 0b111;
@@ -671,19 +682,19 @@ impl UfoFileWriteback {
     }
 
     fn body_bytes(&self) -> usize {
-        self.total_bytes - self.header_bytes
+        self.body_bytes
     }
 
     pub(self) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<UfoWritebackAction> {
-        let off_head = offset.offset_from_header();
-        if off_head > self.body_bytes() {
-            anyhow::bail!("{} outside of range", off_head);
-        }
+        let ufo_body_offset = offset.body_offset();
+        anyhow::ensure!(ufo_body_offset < self.body_bytes(), "{} outside of range", ufo_body_offset);
+        anyhow::ensure!(ufo_body_offset + data.len() <= self.body_bytes(),
+            "{} + {} outside of range", ufo_body_offset, data.len());
 
         let chunk_number = offset.chunk_number();
         assert!(chunk_number < self.chunk_ct);
-        assert_eq!(div_floor(off_head, self.chunk_size), chunk_number);
-        let writeback_offset = self.header_bytes + off_head;
+        assert_eq!(div_floor(ufo_body_offset, self.chunk_size), chunk_number);
+        let writeback_offset = self.header_bytes + ufo_body_offset;
 
         let chunk_byte = chunk_number >> 3;
         let chunk_bit = 1u8 << (chunk_number & 0b111);
@@ -692,11 +703,12 @@ impl UfoFileWriteback {
         debug!(target: "ufo_object", "writeback offset {:#x}", writeback_offset);
 
         let bitmap_ptr: &mut u8 = unsafe { self.mmap.as_ptr().add(chunk_byte).as_mut().unwrap() };
-        let expected_size = std::cmp::min(self.chunk_size, self.total_bytes - writeback_offset);
+        let expected_size = std::cmp::min(self.chunk_size, self.body_bytes() - ufo_body_offset);
 
         anyhow::ensure!(
             data.len() == expected_size,
-            "given data does not match the expected size"
+            "given data does not match the expected size given {} vs expected {}",
+            data.len(), expected_size
         );
 
         // TODO: blocks CAN be loaded with the UFO lock held!! FIXME
@@ -714,8 +726,8 @@ impl UfoFileWriteback {
         }
     }
 
-    pub fn try_readback<'a>(&'a self, offset: &UfoOffset) -> Option<&'a [u8]> {
-        let off_head = offset.offset_from_header();
+    pub fn try_readback<'a>(&'a self, _chunk_lock: &'a BitGuard, offset: &UfoOffset) -> Result<Option<&'a [u8]>, UfoInternalErr> {
+        let off_head = offset.body_offset();
         trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head);
 
         let chunk_number = div_floor(off_head, self.chunk_size);
@@ -732,9 +744,9 @@ impl UfoFileWriteback {
             let arr: &[u8] = unsafe {
                 std::slice::from_raw_parts(self.mmap.as_ptr().add(readback_offset), self.chunk_size)
             };
-            Some(arr)
+            Ok(Some(arr))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -744,7 +756,7 @@ impl UfoFileWriteback {
         unsafe {
             check_return_zero(libc::madvise(
                 ptr.cast(),
-                self.total_bytes,
+                self.total_bytes_with_padding,
                 // punch a hole in the file
                 libc::MADV_REMOVE,
             ))?;
@@ -772,7 +784,7 @@ impl std::cmp::Eq for UfoObject {}
 impl UfoObject {
     /// returns the number of DISK bytes freed (from the writeback utility)
     pub(crate) fn reset_internal(&mut self) -> anyhow::Result<usize> {
-        let length = self.config.true_size - self.config.header_size_with_padding;
+        let length = self.config.true_size_with_padding - self.config.header_size_with_padding;
         unsafe {
             check_return_zero(libc::madvise(
                 self.mmap

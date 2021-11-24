@@ -18,6 +18,7 @@ use btree_interval_map::IntervalMap;
 use crossbeam::channel::{Receiver, Sender};
 use crossbeam::sync::WaitGroup;
 use itertools::Itertools;
+use num::Integer;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use semver::Version;
 use uname::uname;
@@ -335,8 +336,8 @@ impl UfoCore {
             let config = &ufo.config;
 
             let load_size = config.elements_loaded_at_once * config.stride;
-
-            let populate_offset = fault_offset.down_to_nearest_n_relative_to_header(load_size);
+            let populate_offset = fault_offset.down_to_nearest_n_relative_to_body(load_size);
+            assert!(fault_offset.body_offset() - populate_offset.body_offset() < load_size);
 
             let start = populate_offset.as_index_floor();
             let end = start + config.elements_loaded_at_once;
@@ -344,8 +345,13 @@ impl UfoCore {
 
             let populate_size = min(
                 load_size,
-                config.true_size - populate_offset.absolute_offset(),
+                config.body_size() - populate_offset.body_offset(),
             );
+            assert_eq!(
+                (pop_end - start) * config.stride(),
+                populate_size
+            );
+            let populate_size_padded = populate_size.next_multiple_of(&crate::get_page_size());
 
             debug!(target: "ufo_core", "fault at {}, populate {} bytes at {:#x}",
                 start, (pop_end-start) * config.stride, populate_offset.as_ptr_int());
@@ -378,7 +384,7 @@ impl UfoCore {
             let mut from_writeback = true;
             let raw_data = ufo
                 .writeback_util
-                .try_readback(&chunk.offset())
+                .try_readback(&chunk_lock, &chunk.offset())?
                 .map(|v| Ok(v) as Result<&[u8], UfoPopulateError>)
                 .unwrap_or_else(|| {
                     trace!(target: "ufo_core", "calculate");
@@ -396,13 +402,12 @@ impl UfoCore {
                     .copy(
                         raw_data.as_ptr().cast(),
                         chunk.offset().as_ptr_int() as *mut c_void,
-                        populate_size,
+                        populate_size_padded,
                         true,
                     )
                     .expect("unable to populate range");
             }
             trace!("unlock, populated {:?}.{}", ufo.id, chunk.offset());
-            chunk_lock.unlock(); // once we've loaded the data the rest is non critical
 
             event_queue.send_event(UfoEvent::PopulateChunk {
                 memory_used: chunk.size_in_page_bytes(),
@@ -420,12 +425,14 @@ impl UfoCore {
             // release the lock before calculating the hash so other workers can proceed
             state.droplockster();
 
-            if !config.should_try_writeback() {
-                hash_fulfiller.try_init(None);
-            } else {
+            if config.should_try_writeback() {
                 // Make sure to take a slice of the raw data. the kernel operates in page sized chunks but the UFO ends where it ends
                 let calculated_hash = hash_function(&raw_data[0..populate_size]);
+                chunk_lock.unlock(); // must drop this lock before the hash is released
                 hash_fulfiller.try_init(Some(calculated_hash));
+            } else {
+                chunk_lock.unlock(); // must drop this lock before the hash is released
+                hash_fulfiller.try_init(None);
             }
 
             Ok(())
@@ -493,7 +500,7 @@ impl UfoCore {
                 config.stride,
 
                 config.header_size_with_padding,
-                config.true_size,
+                config.true_size_with_padding,
 
                 config.elements_loaded_at_once,
                 config.element_ct,
@@ -519,7 +526,7 @@ impl UfoCore {
             );
 
             let mmap = BaseMmap::new(
-                config.true_size,
+                config.true_size_with_padding,
                 &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
                 &[MmapFlag::Anonymous, MmapFlag::Private, MmapFlag::NoReserve],
                 None,
@@ -527,7 +534,7 @@ impl UfoCore {
             .expect("Mmap Error");
 
             let mmap_ptr = mmap.as_ptr();
-            let true_size = config.true_size;
+            let true_size = config.true_size_with_padding;
             let mmap_base = mmap_ptr as usize;
             let segment = Range {
                 start: mmap_base,
@@ -554,8 +561,8 @@ impl UfoCore {
                 intended_header_size: config.header_size(),
 
                 header_size_with_padding: config.header_size_with_padding,
-                body_size_with_padding: config.true_size - config.header_size_with_padding,
-                total_size_with_padding: config.true_size,
+                body_size_with_padding: config.true_size_with_padding - config.header_size_with_padding,
+                total_size_with_padding: config.true_size_with_padding,
 
                 read_only: config.read_only(),
             };
@@ -657,7 +664,7 @@ impl UfoCore {
             debug!(target: "ufo_core", "chunks dropped {:?}", ufo.id);
 
             this.uffd
-                .unregister(ufo.mmap.as_ptr().cast(), config.true_size)?;
+                .unregister(ufo.mmap.as_ptr().cast(), config.true_size_with_padding)?;
             debug!(target: "ufo_core", "unregistered from uffd {:?}", ufo.id);
 
             let start_addr = segment.start.clone();
@@ -671,8 +678,8 @@ impl UfoCore {
                 intended_header_size: config.header_size(),
 
                 header_size_with_padding: config.header_size_with_padding,
-                body_size_with_padding: config.true_size - config.header_size_with_padding,
-                total_size_with_padding: config.true_size,
+                body_size_with_padding: config.true_size_with_padding - config.header_size_with_padding,
+                total_size_with_padding: config.true_size_with_padding,
 
                 memory_freed,
                 chunks_freed,

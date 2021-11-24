@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::bitwise_spinlock::BitlockErr;
+
 #[derive(Error, Debug)]
 pub enum UfoInternalErr {
     #[error("Core shutdown")]
@@ -8,6 +10,8 @@ pub enum UfoInternalErr {
     CoreBroken(String),
     #[error("Ufo Lock is broken")]
     UfoLockBroken,
+    #[error("Ufo writeback bitlock error {0}")]
+    UfoBitlockError(BitlockErr),
     #[error("Ufo not found")]
     UfoNotFound,
     #[error("Ufo State Error: {0}")]
@@ -84,6 +88,12 @@ impl<T> From<std::sync::PoisonError<T>> for UfoPopulateError {
 
 impl From<UfoInternalErr> for UfoPopulateError {
     fn from(_e: UfoInternalErr) -> Self {
+        UfoPopulateError
+    }
+}
+
+impl From<BitlockErr> for UfoPopulateError {
+    fn from(_e: BitlockErr) -> Self {
         UfoPopulateError
     }
 }
