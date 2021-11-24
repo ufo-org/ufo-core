@@ -686,7 +686,7 @@ impl UfoFileWriteback {
 
         writeback_arr.copy_from_slice(data);
         let old_bits = atomic_bitset(bitmap_ptr, chunk_bit);
-        if 0 != chunk_bit & old_bits {
+        if 0 == chunk_bit & old_bits {
             Ok(UfoWritebackAction::NewWriteback)
         } else {
             Ok(UfoWritebackAction::UpdateWriteback)
