@@ -20,6 +20,7 @@ use crossbeam::sync::WaitGroup;
 use itertools::Itertools;
 use num::Integer;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use semver::Version;
 use uname::uname;
 use userfaultfd::Uffd;
@@ -174,6 +175,7 @@ impl UfoEventSender {
 pub struct UfoCore {
     uffd: Uffd,
     state: Mutex<UfoCoreState>,
+    rayon_pool: ThreadPool,
 
     pub config: Arc<UfoCoreConfig>,
     pub msg_send: Sender<UfoInstanceMsg>,
@@ -226,9 +228,15 @@ impl UfoCore {
             event_qeueue_shutdown_sync.clone(),
         )?;
 
+        let rayon_pool = ThreadPoolBuilder::new()
+            .thread_name(|x| format!("UFO Core hasher {}", x))
+            .build()
+            .unwrap();
+
         let core = Arc::new(UfoCore {
             uffd,
             config,
+            rayon_pool,
             msg_send: send,
             state,
             ufo_event_sender: Mutex::new(sender),
@@ -347,10 +355,7 @@ impl UfoCore {
                 load_size,
                 config.body_size() - populate_offset.body_offset(),
             );
-            assert_eq!(
-                (pop_end - start) * config.stride(),
-                populate_size
-            );
+            assert_eq!((pop_end - start) * config.stride(), populate_size);
             let populate_size_padded = populate_size.next_multiple_of(&crate::get_page_size());
 
             debug!(target: "ufo_core", "fault at {}, populate {} bytes at {:#x}",
@@ -427,9 +432,16 @@ impl UfoCore {
 
             if config.should_try_writeback() {
                 // Make sure to take a slice of the raw data. the kernel operates in page sized chunks but the UFO ends where it ends
-                let calculated_hash = hash_function(&raw_data[0..populate_size]);
+                let mut calculated_hash = None;
+                core.rayon_pool.in_place_scope(|s| {
+                    // do this work in a dedicated thread pool so things waiting can't block the work
+                    s.spawn(|_| {
+                        calculated_hash = Some(hash_function(&raw_data[0..populate_size]));
+                    });
+                });
+                assert!(calculated_hash.is_some());
                 chunk_lock.unlock(); // must drop this lock before the hash is released
-                hash_fulfiller.try_init(Some(calculated_hash));
+                hash_fulfiller.try_init(calculated_hash);
             } else {
                 chunk_lock.unlock(); // must drop this lock before the hash is released
                 hash_fulfiller.try_init(None);
@@ -561,7 +573,8 @@ impl UfoCore {
                 intended_header_size: config.header_size(),
 
                 header_size_with_padding: config.header_size_with_padding,
-                body_size_with_padding: config.true_size_with_padding - config.header_size_with_padding,
+                body_size_with_padding: config.true_size_with_padding
+                    - config.header_size_with_padding,
                 total_size_with_padding: config.true_size_with_padding,
 
                 read_only: config.read_only(),
@@ -678,7 +691,8 @@ impl UfoCore {
                 intended_header_size: config.header_size(),
 
                 header_size_with_padding: config.header_size_with_padding,
-                body_size_with_padding: config.true_size_with_padding - config.header_size_with_padding,
+                body_size_with_padding: config.true_size_with_padding
+                    - config.header_size_with_padding,
                 total_size_with_padding: config.true_size_with_padding,
 
                 memory_freed,

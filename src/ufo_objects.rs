@@ -132,7 +132,7 @@ impl UfoObjectConfig {
     pub fn read_only(&self) -> bool {
         self.read_only
     }
-    pub fn body_size(&self) -> usize{
+    pub fn body_size(&self) -> usize {
         self.element_ct * self.stride
     }
 }
@@ -629,8 +629,12 @@ impl UfoFileWriteback {
         let data_bytes_with_padding = (cfg.element_ct * cfg.stride).next_multiple_of(&chunk_size);
         let total_bytes_with_padding = bitmap_bytes + bitlock_bytes + data_bytes_with_padding;
 
-        let temp_file =
-            unsafe { OpenFile::temp(core.config.writeback_temp_path.as_str(), total_bytes_with_padding) }?;
+        let temp_file = unsafe {
+            OpenFile::temp(
+                core.config.writeback_temp_path.as_str(),
+                total_bytes_with_padding,
+            )
+        }?;
 
         let mmap = MmapFd::new(
             total_bytes_with_padding,
@@ -687,9 +691,17 @@ impl UfoFileWriteback {
 
     pub(self) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<UfoWritebackAction> {
         let ufo_body_offset = offset.body_offset();
-        anyhow::ensure!(ufo_body_offset < self.body_bytes(), "{} outside of range", ufo_body_offset);
-        anyhow::ensure!(ufo_body_offset + data.len() <= self.body_bytes(),
-            "{} + {} outside of range", ufo_body_offset, data.len());
+        anyhow::ensure!(
+            ufo_body_offset < self.body_bytes(),
+            "{} outside of range",
+            ufo_body_offset
+        );
+        anyhow::ensure!(
+            ufo_body_offset + data.len() <= self.body_bytes(),
+            "{} + {} outside of range",
+            ufo_body_offset,
+            data.len()
+        );
 
         let chunk_number = offset.chunk_number();
         assert!(chunk_number < self.chunk_ct);
@@ -708,7 +720,8 @@ impl UfoFileWriteback {
         anyhow::ensure!(
             data.len() == expected_size,
             "given data does not match the expected size given {} vs expected {}",
-            data.len(), expected_size
+            data.len(),
+            expected_size
         );
 
         // TODO: blocks CAN be loaded with the UFO lock held!! FIXME
@@ -726,7 +739,11 @@ impl UfoFileWriteback {
         }
     }
 
-    pub fn try_readback<'a>(&'a self, _chunk_lock: &'a BitGuard, offset: &UfoOffset) -> Result<Option<&'a [u8]>, UfoInternalErr> {
+    pub fn try_readback<'a>(
+        &'a self,
+        _chunk_lock: &'a BitGuard,
+        offset: &UfoOffset,
+    ) -> Result<Option<&'a [u8]>, UfoInternalErr> {
         let off_head = offset.body_offset();
         trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head);
 
