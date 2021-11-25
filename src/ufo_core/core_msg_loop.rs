@@ -276,14 +276,14 @@ impl UfoCore {
                     shutdown_impl(&this, &event_sender, populate_pool);
                     drop(recv);
                     info!(target: "ufo_core", "closing msg loop");
-                    return false; /*done*/
+                    return true; /*done*/
                 }
             },
             err => {
                 err.expect("recv error");
             }
         }
-        return true;
+        return false;
     }
 
     pub(super) fn msg_loop<F>(
