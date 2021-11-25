@@ -10,7 +10,6 @@ use crate::populate_workers::PopulateWorkers;
 use crate::UfoEventSender;
 
 use crate::mmap_wrapers::*;
-use crate::ufo_objects::*;
 
 use super::*;
 
