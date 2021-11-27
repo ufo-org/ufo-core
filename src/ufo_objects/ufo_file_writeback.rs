@@ -1,7 +1,6 @@
 use std::io::Error;
 
 use anyhow::Result;
-use num::Integer;
 
 use log::{debug, trace};
 
@@ -10,6 +9,7 @@ use crate::bitwise_spinlock::{BitGuard, Bitlock};
 use crate::math::*;
 use crate::mmap_wrapers::*;
 use crate::return_checks::*;
+use crate::sizes::*;
 use crate::ufo_core::*;
 
 use super::*;
@@ -40,13 +40,13 @@ impl UfoWritebackAction {
 pub(crate) struct UfoFileWriteback {
     ufo_id: UfoId,
     mmap: MmapFd,
-    chunk_ct: usize,
-    final_chunk_size_page_aligned: usize,
+    chunk_ct: Total<Chunks>,
+    final_chunk_size: Bytes,
     pub(crate) chunk_locks: Bitlock,
-    chunk_size: usize,
-    total_bytes_with_padding: usize,
-    body_bytes: usize,
-    header_bytes: usize,
+    chunk_size: ToChunk<Bytes>,
+    total_bytes: Total<PageAlignedBytes>,
+    body_bytes: Total<Bytes>,
+    header_offset: FromHeader<Bytes, FromBase<Bytes>>,
     // bitlock_bytes: usize,
     // bitmap_bytes: usize,
 }
@@ -58,23 +58,44 @@ impl UfoFileWriteback {
         core: &Arc<UfoCore>,
     ) -> Result<UfoFileWriteback, Error> {
         let page_size = crate::get_page_size();
+        let chunk_ct: Total<Chunks> = cfg
+            .elements_loaded_at_once
+            .align_up(cfg.element_ct().total())
+            .as_chunks()
+            .as_total();
+        assert!(
+            chunk_ct.total().chunks * cfg.elements_loaded_at_once.alignment_quantum().elements
+                >= cfg.element_ct.total().elements
+        );
 
-        let chunk_ct = div_ceil(cfg.element_ct, cfg.elements_loaded_at_once);
-        assert!(chunk_ct * cfg.elements_loaded_at_once >= cfg.element_ct);
+        let elements_at_once = cfg.elements_loaded_at_once;
+        let stride_bytes = cfg.stride.alignment_quantum();
 
-        let chunk_size = cfg.elements_loaded_at_once * cfg.stride;
-        let final_chunk_size_page_aligned =
-            (match (cfg.true_size_with_padding - cfg.header_size_with_padding) % chunk_size {
-                0 => chunk_size,
-                x => x,
-            })
-            .next_multiple_of(&page_size);
+        let chunk_size: ToChunk<Bytes> =
+            (elements_at_once.alignment_quantum().elements * stride_bytes.bytes).into();
+        assert_eq!(
+            chunk_size.alignment_quantum().bytes,
+            ToPage
+                .align_up(&chunk_size.alignment_quantum())
+                .aligned()
+                .bytes
+        );
 
-        let bitmap_bytes = div_ceil(chunk_ct, 8); /*8 bits per byte*/
+        let trailing_elements = elements_at_once
+            .align_down(cfg.element_ct().total())
+            .aligned()
+            .sub(cfg.element_ct().total());
+
+        let final_chunk_size = if 0 == trailing_elements.elements {
+            cfg.chunk_size().alignment_quantum()
+        } else {
+            (trailing_elements.elements * stride_bytes.bytes).into()
+        };
+
+        let bitmap_bytes = div_ceil(chunk_ct.total().chunks, 8).into(); /*8 bits per byte*/
         // Now we want to get the bitmap bytes up to the next multiple of the page size
-        let bitmap_bytes = bitmap_bytes.next_multiple_of(&page_size);
-        assert!(bitmap_bytes * 8 >= chunk_ct);
-        assert!(bitmap_bytes.trailing_zeros() >= page_size.trailing_zeros());
+        let bitmap_bytes = ToPage.align_up(&bitmap_bytes);
+        assert!(bitmap_bytes.aligned().bytes * 8 >= chunk_ct.total().chunks);
 
         // the bitlock uses the same math as the bitmap
         let bitlock_bytes = bitmap_bytes;
@@ -82,18 +103,24 @@ impl UfoFileWriteback {
         // round the mmap up to the nearest chunk size
         // when loading we need to give back chunks this large so even though no useful user data may
         // be in the last chunk we still need to have this available for in the readback chunk
-        let data_bytes_with_padding = (cfg.element_ct * cfg.stride).next_multiple_of(&chunk_size);
-        let total_bytes_with_padding = bitmap_bytes + bitlock_bytes + data_bytes_with_padding;
+
+        let data_bytes_with_padding = cfg.aligned_body_size();
+        let total_bytes = bitmap_bytes
+            .add(&bitlock_bytes)
+            .add(&data_bytes_with_padding);
+
+        let body_bytes: Bytes =
+            (cfg.stride().alignment_quantum().bytes * cfg.element_ct().total().elements).into();
 
         let temp_file = unsafe {
             OpenFile::temp(
                 core.config.writeback_temp_path.as_str(),
-                total_bytes_with_padding,
+                total_bytes.aligned().bytes,
             )
         }?;
 
         let mmap = MmapFd::new(
-            total_bytes_with_padding,
+            total_bytes.aligned().bytes,
             &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
             &[MmapFlag::Shared],
             None,
@@ -101,89 +128,105 @@ impl UfoFileWriteback {
             0,
         )?;
 
-        let chunk_locks = Bitlock::new(unsafe { mmap.as_ptr().add(bitmap_bytes) }, chunk_ct);
+        let lock_ptr = unsafe { mmap.as_ptr().add(bitmap_bytes.aligned().bytes) };
+        let chunk_locks = Bitlock::new(lock_ptr, chunk_ct.total().chunks);
+
+        let header_bytes = bitmap_bytes.add(&bitlock_bytes).aligned();
+        let header_offset = Absolute::with_base(0.into()).with_header(header_bytes);
+        // Offset::absolute(header_bytes)
+        //     .with_base(0.into())
+        //     .with_header(header_bytes);
 
         Ok(UfoFileWriteback {
             ufo_id,
             chunk_ct,
             chunk_size,
             chunk_locks,
-            final_chunk_size_page_aligned,
+            final_chunk_size,
             mmap,
-            total_bytes_with_padding,
-            body_bytes: cfg.element_ct * cfg.stride,
-            header_bytes: bitmap_bytes + bitlock_bytes,
+            body_bytes: body_bytes.as_total(),
+            total_bytes: total_bytes.as_total(),
+            header_offset,
         })
     }
 
-    pub fn used_bytes(&self) -> usize {
+    pub fn used_bytes(&self) -> PageAlignedBytes {
         let chunk_ct = self.chunk_ct;
-        let last_chunk = chunk_ct - 1;
+        let last_chunk = chunk_ct.total().chunks - 1;
 
         let bitmap_ptr = self.mmap.as_ptr();
-        let mut sum = 0;
-        for x in 0..chunk_ct {
+        let mut sum: PageAlignedBytes = ToPage.align_down(&0.into());
+        for x in 0..chunk_ct.total().chunks {
             let byte = x >> 3;
             let bit = x & 0b111;
             let mask = 1 << bit;
 
             let size = if x == last_chunk {
-                self.final_chunk_size_page_aligned
+                ToPage.align_up(&self.final_chunk_size)
             } else {
-                self.chunk_size
+                ToPage.align_up(&self.chunk_size.alignment_quantum())
             };
 
             let is_set = unsafe { *bitmap_ptr.add(byte) & mask } > 0;
             if is_set {
-                sum += size;
+                sum = sum.add(&size);
             }
         }
         sum
     }
 
-    fn body_bytes(&self) -> usize {
+    fn body_bytes(&self) -> Total<Bytes> {
         self.body_bytes
     }
 
     pub(super) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<UfoWritebackAction> {
-        let ufo_body_offset = offset.body_offset();
+        let ufo_body_offset = offset.offset().from_header();
         anyhow::ensure!(
-            ufo_body_offset < self.body_bytes(),
+            ufo_body_offset.bytes < self.body_bytes().total().bytes,
             "{} outside of range",
-            ufo_body_offset
+            ufo_body_offset.bytes
         );
         anyhow::ensure!(
-            ufo_body_offset + data.len() <= self.body_bytes(),
+            ufo_body_offset.bytes + data.len() <= self.body_bytes().total().bytes,
             "{} + {} outside of range",
-            ufo_body_offset,
+            ufo_body_offset.bytes,
             data.len()
         );
 
-        let chunk_number = offset.chunk_number();
-        assert!(chunk_number < self.chunk_ct);
-        assert_eq!(div_floor(ufo_body_offset, self.chunk_size), chunk_number);
-        let writeback_offset = self.header_bytes + ufo_body_offset;
+        let chunk_number = offset.chunk().absolute_offset();
+        assert!(chunk_number.chunks < self.chunk_ct.total().chunks);
+        assert_eq!(
+            self.chunk_size.align_down(&ufo_body_offset).as_chunks(),
+            chunk_number
+        );
+        let writeback_offset: Bytes = self.header_offset.relative(ufo_body_offset).from_header();
+        let chunk_byte = chunk_number.chunks >> 3;
+        let chunk_bit = 1u8 << (chunk_number.chunks & 0b111);
+        assert!(chunk_byte < (self.header_offset.header_size().bytes >> 1));
 
-        let chunk_byte = chunk_number >> 3;
-        let chunk_bit = 1u8 << (chunk_number & 0b111);
-        assert!(chunk_byte < (self.header_bytes >> 1));
-
-        debug!(target: "ufo_object", "writeback offset {:#x}", writeback_offset);
+        debug!(target: "ufo_object", "writeback offset {:#x}", writeback_offset.bytes);
 
         let bitmap_ptr: &mut u8 = unsafe { self.mmap.as_ptr().add(chunk_byte).as_mut().unwrap() };
-        let expected_size = std::cmp::min(self.chunk_size, self.body_bytes() - ufo_body_offset);
+        let expected_size: Bytes = std::cmp::min(
+            self.chunk_size.alignment_quantum().bytes,
+            self.body_bytes().total().bytes - ufo_body_offset.bytes,
+        )
+        .into();
 
         anyhow::ensure!(
-            data.len() == expected_size,
+            data.len() == expected_size.bytes,
             "given data does not match the expected size given {} vs expected {}",
             data.len(),
-            expected_size
+            expected_size.bytes
         );
 
         // TODO: blocks CAN be loaded with the UFO lock held!! FIXME
         // We aren't a mutable copy but writebacks never overlap and we hold the UFO read lock so a chunk cannot be loaded
         let writeback_arr: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(self.mmap.as_ptr().add(writeback_offset), expected_size)
+            std::slice::from_raw_parts_mut(
+                self.mmap.as_ptr().add(writeback_offset.bytes),
+                expected_size.bytes,
+            )
         };
 
         writeback_arr.copy_from_slice(data);
@@ -200,22 +243,25 @@ impl UfoFileWriteback {
         _chunk_lock: &'a BitGuard,
         offset: &UfoOffset,
     ) -> Result<Option<&'a [u8]>, UfoInternalErr> {
-        let off_head = offset.body_offset();
-        trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head);
+        let off_head = offset.offset().from_header();
+        trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head.bytes);
 
-        let chunk_number = div_floor(off_head, self.chunk_size);
-        let readback_offset = self.header_bytes + off_head;
+        let chunk_number = self.chunk_size.align_down(&off_head).as_chunks();
+        let readback_offset = self.header_offset.relative(off_head).from_header();
 
-        let chunk_byte = chunk_number >> 3;
-        let chunk_bit = 1u8 << (chunk_number & 0b111);
+        let chunk_byte = chunk_number.chunks >> 3;
+        let chunk_bit = 1u8 << (chunk_number.chunks & 0b111);
 
         let bitmap_ptr: &u8 = unsafe { self.mmap.as_ptr().add(chunk_byte).as_ref().unwrap() };
         let is_written = *bitmap_ptr & chunk_bit != 0;
 
         if is_written {
-            trace!(target: "ufo_object", "allow readback {:?}@{:#x}", self.ufo_id, off_head);
+            trace!(target: "ufo_object", "allow readback {:?}@{:#x}", self.ufo_id, off_head.bytes);
             let arr: &[u8] = unsafe {
-                std::slice::from_raw_parts(self.mmap.as_ptr().add(readback_offset), self.chunk_size)
+                std::slice::from_raw_parts(
+                    self.mmap.as_ptr().add(readback_offset.bytes),
+                    self.chunk_size.alignment_quantum().bytes,
+                )
             };
             Ok(Some(arr))
         } else {
@@ -223,13 +269,13 @@ impl UfoFileWriteback {
         }
     }
 
-    pub fn reset(&self) -> Result<usize> {
+    pub fn reset(&self) -> Result<PageAlignedBytes> {
         let used_disk = self.used_bytes();
         let ptr = self.mmap.as_ptr();
         unsafe {
             check_return_zero(libc::madvise(
                 ptr.cast(),
-                self.total_bytes_with_padding,
+                self.total_bytes.total().aligned().bytes,
                 // punch a hole in the file
                 libc::MADV_REMOVE,
             ))?;

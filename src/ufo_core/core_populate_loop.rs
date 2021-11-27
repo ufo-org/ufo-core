@@ -4,13 +4,12 @@ use std::{cmp::min, ffi::c_void, ops::Deref};
 
 use log::{debug, info, trace, warn};
 
-use num::Integer;
-
 use crate::events::UfoEvent;
 use crate::experimental_compat::Droplockster;
 use crate::once_await::OnceFulfiller;
 use crate::populate_workers::{RequestWorker, ShouldRun};
 
+use crate::sizes::*;
 use crate::ufo_objects::*;
 use crate::write_buffer::*;
 
@@ -55,25 +54,52 @@ impl UfoCore {
 
             let config = &ufo.config;
 
-            let load_size = config.elements_loaded_at_once * config.stride;
-            let populate_offset = fault_offset.down_to_nearest_n_relative_to_body(load_size);
-            assert!(fault_offset.body_offset() - populate_offset.body_offset() < load_size);
-
-            let start = populate_offset.as_index_floor();
-            let end = start + config.elements_loaded_at_once;
-            let pop_end = min(end, config.element_ct);
-
-            let populate_size = min(
-                load_size,
-                config.body_size() - populate_offset.body_offset(),
+            let load_size = config.chunk_size().alignment_quantum();
+            let populate_offset = config
+                .chunk_size()
+                .align_down(&fault_offset.offset().from_header());
+            assert!(
+                fault_offset.offset().from_header().bytes - populate_offset.aligned().bytes
+                    < load_size.bytes,
+                "incorrect chunk calculated for populate"
             );
-            assert_eq!((pop_end - start) * config.stride(), populate_size);
-            let populate_size_padded = populate_size.next_multiple_of(&crate::get_page_size());
+            let populate_offset = fault_offset
+                .offset()
+                .basis()
+                .relative(populate_offset.aligned());
+
+            let start = config
+                .stride()
+                .align_down(&populate_offset.from_header())
+                .as_elements();
+            let end = start.add(&config.elements_loaded_at_once.alignment_quantum());
+            let pop_end = config.element_ct().bound(end).bounded();
+            let pop_ct = pop_end.sub(&start);
+
+            let populate_size = config.stride.as_bytes(&pop_ct);
+            assert_eq!(
+                min(
+                    load_size.bytes,
+                    config
+                        .body_size()
+                        .total()
+                        .sub(&populate_offset.from_header())
+                        .bytes,
+                ),
+                populate_size.bytes
+            );
+            let populate_size_padded = ToPage.align_up(&populate_size);
 
             debug!(target: "ufo_core", "fault at {}, populate {} bytes at {:#x}",
-                start, (pop_end-start) * config.stride, populate_offset.as_ptr_int());
+                start.elements, config.stride.as_bytes(&pop_ct).bytes, populate_offset.absolute_offset().bytes );
 
-            let chunk = UfoChunk::new(&ufo_arc, &ufo, populate_offset, populate_size);
+            let ufo_offset = UfoOffset::from_addr(&ufo, addr);
+            assert_eq!(
+                populate_offset.absolute_offset(),
+                ufo_offset.offset().absolute_offset()
+            );
+
+            let chunk = UfoChunk::new(&ufo_arc, &ufo, ufo_offset, populate_size);
             // shouldn't need to drop this since read is a shared lock
             // ufo.droplockster();
 
@@ -95,7 +121,7 @@ impl UfoCore {
             let chunk_lock = ufo
                 .writeback_util
                 .chunk_locks
-                .spinlock(chunk.offset().chunk_number())
+                .spinlock(chunk.offset().chunk().absolute_offset())
                 .map_err(|_| UfoPopulateError)?;
 
             let mut from_writeback = true;
@@ -107,9 +133,9 @@ impl UfoCore {
                     trace!(target: "ufo_core", "calculate");
                     from_writeback = false;
                     unsafe {
-                        buffer.ensure_capcity(load_size);
-                        (config.populate)(start, pop_end, buffer.ptr)?;
-                        Ok(&buffer.slice()[0..load_size])
+                        buffer.ensure_capcity(load_size.bytes);
+                        (config.populate)(start.elements, pop_end.elements, buffer.ptr)?;
+                        Ok(&buffer.slice()[0..load_size.bytes])
                     }
                 })?;
             trace!(target: "ufo_core", "data ready");
@@ -118,8 +144,8 @@ impl UfoCore {
                 core.uffd
                     .copy(
                         raw_data.as_ptr().cast(),
-                        chunk.offset().as_ptr_int() as *mut c_void,
-                        populate_size_padded,
+                        chunk.offset().offset().absolute_offset().bytes as *mut c_void,
+                        populate_size_padded.aligned().bytes,
                         true,
                     )
                     .expect("unable to populate range");
@@ -132,7 +158,7 @@ impl UfoCore {
                 loaded_from_writeback: from_writeback,
             })?;
 
-            assert!(raw_data.len() == load_size);
+            assert!(raw_data.len() == load_size.bytes);
             let hash_fulfiller = chunk.hash_fulfiller();
 
             let mut state = core.get_locked_state().unwrap();
@@ -148,7 +174,7 @@ impl UfoCore {
                 core.rayon_pool.in_place_scope(|s| {
                     // do this work in a dedicated thread pool so things waiting can't block the work
                     s.spawn(|_| {
-                        calculated_hash = Some(hash_function(&raw_data[0..populate_size]));
+                        calculated_hash = Some(hash_function(&raw_data[0..populate_size.bytes]));
                     });
                 });
                 assert!(calculated_hash.is_some());

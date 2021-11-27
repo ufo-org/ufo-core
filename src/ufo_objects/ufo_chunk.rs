@@ -1,6 +1,5 @@
 use core::slice;
 use std::io::Error;
-use std::num::NonZeroUsize;
 use std::panic;
 use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 
@@ -12,6 +11,7 @@ use log::{debug, trace};
 use crate::events::{UfoEvent, UfoUnloadDisposition};
 use crate::once_await::OnceAwait;
 use crate::once_await::OnceFulfiller;
+use crate::sizes::*;
 use crate::{UfoEventSender, UfoWriteListenerEvent};
 
 use crate::mmap_wrapers::*;
@@ -25,7 +25,7 @@ pub(crate) struct UfoChunk {
     has_listener: bool,
     object: Weak<RwLock<UfoObject>>,
     offset: UfoOffset,
-    length: Option<NonZeroUsize>,
+    length: Option<Bytes>,
     hash: Arc<OnceAwait<Option<DataHash>>>,
 }
 
@@ -34,14 +34,14 @@ impl UfoChunk {
         arc: &WrappedUfoObject,
         object: &RwLockReadGuard<UfoObject>,
         offset: UfoOffset,
-        length: usize,
+        length: Bytes,
     ) -> UfoChunk {
-        assert!(length > 0);
+        assert!(length.bytes > 0);
         assert!(
-            offset.absolute_offset() + length <= object.mmap.length(),
+            offset.offset().from_base().bytes + length.bytes <= object.mmap.length(),
             "{} + {} > {}",
-            offset.absolute_offset(),
-            length,
+            offset.offset().from_base().bytes,
+            length.bytes,
             object.mmap.length()
         );
         UfoChunk {
@@ -49,7 +49,7 @@ impl UfoChunk {
             has_listener: object.config.writeback_listener.is_some(),
             object: Arc::downgrade(arc),
             offset,
-            length: NonZeroUsize::new(length),
+            length: Some(length),
             hash: Arc::new(OnceAwait::new()),
         }
     }
@@ -69,7 +69,7 @@ impl UfoChunk {
     ) -> Result<usize> {
         match (self.length, self.object.upgrade()) {
             (Some(length), Some(obj)) => {
-                let length_bytes = length.get();
+                let length_bytes = length.bytes;
                 let length_page_multiple = self.size_in_page_bytes();
                 let obj = obj
                     .read()
@@ -83,7 +83,8 @@ impl UfoChunk {
                     trace!(target: "ufo_object", "no writeback {:?}", self.ufo_id);
                     // Not doing writebacks, punch it out and leave
                     unsafe {
-                        let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
+                        let offset_bytes = self.offset.offset().from_base().bytes;
+                        let data_ptr = obj.mmap.as_ptr().add(offset_bytes);
                         check_return_zero(libc::madvise(
                             data_ptr.cast(),
                             length_page_multiple,
@@ -109,7 +110,7 @@ impl UfoChunk {
                 // We first remap the pages from the UFO into the file backing
                 // we check the value of the page after the remap because the remap
                 //  is atomic and will let us read cleanly in the face of racing writers
-                let chunk_number = self.offset.chunk_number();
+                let chunk_number = self.offset.chunk().absolute_offset();
                 debug!("try to uncontended-lock {:?}.{}", obj.id, self.offset());
                 let chunk_lock = obj
                     .writeback_util
@@ -119,7 +120,10 @@ impl UfoChunk {
                 trace!("locked {:?}@{}", obj.id, self.offset());
                 unsafe {
                     anyhow::ensure!(length_page_multiple <= pivot.length(), "Pivot too small");
-                    let data_ptr = obj.mmap.as_ptr().add(self.offset.absolute_offset());
+                    let data_ptr = obj
+                        .mmap
+                        .as_ptr()
+                        .add(self.offset.offset().from_base().bytes);
                     let pivot_ptr = pivot.as_ptr();
                     check_ptr_nonneg(libc::mremap(
                         data_ptr.cast(),
@@ -136,18 +140,25 @@ impl UfoChunk {
 
                 if let Some(hash) = stored_hash {
                     let calculated_hash = pivot.with_slice(0, length_bytes, hash_function);
-                    trace!(target: "ufo_object", "{:?}@{} writeback hash matches {}", self.ufo_id, self.offset(), hash == &calculated_hash);
+                    trace!(target: "ufo_object", "{:?}@{} writeback hash matches {}", 
+                        self.ufo_id, self.offset(), hash == &calculated_hash);
                     if hash != &calculated_hash {
                         let (_, rb): ((), Result<()>) = rayon::join(
                             || {
-                                let start = self.offset.as_index_floor();
-                                let end = (obj.config.elements_loaded_at_once() + start)
-                                    .min(obj.config.element_ct());
+                                let start =
+                                    self.offset.as_index_floor().absolute_offset().aligned();
+                                let loaded_at_once =
+                                    obj.config.elements_loaded_at_once().alignment_quantum();
+                                let end = obj
+                                    .config
+                                    .element_ct()
+                                    .bound(loaded_at_once.add(&start))
+                                    .bounded();
                                 let ptr = pivot.as_ptr();
                                 if let Some(listener) = &obj.config.writeback_listener {
                                     listener(UfoWriteListenerEvent::Writeback {
-                                        start_idx: start,
-                                        end_idx: end,
+                                        start_idx: start.elements,
+                                        end_idx: end.elements,
                                         data: ptr,
                                     });
                                 }
@@ -201,7 +212,7 @@ impl UfoChunk {
             debug!(
                 "Chunk already free {:?}@{}",
                 self.ufo_id(),
-                self.offset().chunk_number()
+                self.offset().chunk().absolute_offset().chunks
             );
             return Ok(()); // Already freed
         }
@@ -222,21 +233,25 @@ impl UfoChunk {
             .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
 
         let chunk_slice = unsafe {
-            let chunk_ptr: *const u8 = ufo.mmap.as_ptr().add(self.offset.absolute_offset());
-            let chunk_length = length.get();
+            let chunk_ptr: *const u8 = ufo
+                .mmap
+                .as_ptr()
+                .add(self.offset.offset().from_base().bytes);
+            let chunk_length = length.bytes;
             slice::from_raw_parts(chunk_ptr, chunk_length)
         };
 
-        println!("hashing {}", self.offset().chunk_number());
+        println!("hashing {}", self.offset().chunk().absolute_offset().chunks);
         let calculated_hash = hash_function(chunk_slice);
-        println!("hashed {}", self.offset().chunk_number());
+        println!("hashed {}", self.offset().chunk().absolute_offset().chunks);
 
         if known_hash != calculated_hash {
-            let start = self.offset.as_index_floor();
-            let end = ufo.config.element_ct.min(start + self.size());
+            let start = self.offset.as_index_floor().absolute_offset().aligned();
+            let elements = (length.bytes / ufo.config.stride().alignment_quantum().bytes).into();
+            let end = ufo.config.element_ct.bound(start.add(&elements)).bounded();
             (writeback_listener)(UfoWriteListenerEvent::Writeback {
-                start_idx: start,
-                end_idx: end,
+                start_idx: start.elements,
+                end_idx: end.elements,
                 data: chunk_slice.as_ptr(),
             });
         }
@@ -250,7 +265,7 @@ impl UfoChunk {
     }
 
     pub fn size(&self) -> usize {
-        self.length.map(NonZeroUsize::get).unwrap_or(0)
+        self.length.map(|l| l.bytes).unwrap_or(0)
     }
 
     pub(crate) fn size_in_page_bytes(&self) -> usize {

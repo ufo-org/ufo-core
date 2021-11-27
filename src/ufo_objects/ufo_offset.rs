@@ -1,72 +1,61 @@
-use num::Integer;
-
-use crate::{math::div_floor, UfoObject};
+use crate::{sizes::*, UfoObject};
 
 pub(crate) struct UfoOffset {
-    base_addr: usize,
-    chunk_number: usize,
-    stride: usize,
-    header_bytes_with_padding: usize,
-    absolute_offset_bytes: usize,
+    chunk_number: ChunkOffset,
+    index_floor: ChunkAlignedElements,
+    stride: ToStride<Bytes>,
+    offset: BodyOffsetBytes,
 }
 
 impl UfoOffset {
     pub fn from_addr(ufo: &UfoObject, addr: *const libc::c_void) -> UfoOffset {
-        let addr = addr as usize;
-        let base_addr = ufo.mmap.as_ptr() as usize;
-        let absolute_offset_bytes = addr
-            .checked_sub(base_addr)
-            .unwrap_or_else(|| panic!("Addr less than base {} < {}", addr, base_addr));
-        let header_bytes_with_padding = ufo.config.header_size_with_padding;
+        let base_addr = FromBase::new((ufo.mmap.as_ptr() as usize).into());
+        let header_base = base_addr.with_header(ufo.config.header_size_with_padding.aligned());
+
+        let offset: BodyOffsetBytes = header_base.with_absolute((addr as usize).into());
 
         assert!(
-            header_bytes_with_padding <= absolute_offset_bytes,
+            offset.absolute_offset().bytes
+                >= header_base.relative(0.into()).absolute_offset().bytes,
             "Cannot offset into the header"
         );
 
-        let offset_from_header = absolute_offset_bytes - header_bytes_with_padding;
-        let bytes_loaded_at_once = ufo.config.elements_loaded_at_once * ufo.config.stride;
-        let chunk_number = div_floor(offset_from_header, bytes_loaded_at_once);
-        assert!(chunk_number * bytes_loaded_at_once <= offset_from_header);
-        assert!((chunk_number + 1) * bytes_loaded_at_once > offset_from_header);
+        assert!(
+            ufo.config.body_size().total().bytes > offset.from_header().bytes,
+            "address past the end of the UFO"
+        );
+
+        let chunk_size = ufo.config.chunk_size();
+        let chunk_number = chunk_size.align_down(&offset.from_header()).as_chunks();
+
+        let index = ufo
+            .config
+            .stride()
+            .align_down(&offset.from_header())
+            .as_elements();
+        let index_floor = ufo.config.elements_loaded_at_once().align_down(&index);
+
+        let chunk_number = Offset::absolute(chunk_number.into());
+        let index_floor = Offset::absolute(index_floor);
 
         UfoOffset {
-            base_addr,
             chunk_number,
+            index_floor,
             stride: ufo.config.stride,
-            header_bytes_with_padding,
-            absolute_offset_bytes,
+            offset,
         }
     }
 
-    pub fn absolute_offset(&self) -> usize {
-        self.absolute_offset_bytes
+    pub fn offset(&self) -> &BodyOffsetBytes {
+        &self.offset
     }
 
-    pub fn body_offset(&self) -> usize {
-        self.absolute_offset_bytes - self.header_bytes_with_padding
+    pub fn as_index_floor(&self) -> &ChunkAlignedElements {
+        &self.index_floor
     }
 
-    pub fn as_ptr_int(&self) -> usize {
-        self.base_addr + self.absolute_offset()
-    }
-
-    pub fn as_index_floor(&self) -> usize {
-        div_floor(self.body_offset(), self.stride)
-    }
-
-    pub fn down_to_nearest_n_relative_to_body(&self, nearest: usize) -> UfoOffset {
-        let offset = self.body_offset().prev_multiple_of(&nearest);
-        let absolute_offset_bytes = self.header_bytes_with_padding + offset;
-
-        UfoOffset {
-            absolute_offset_bytes,
-            ..*self
-        }
-    }
-
-    pub fn chunk_number(&self) -> usize {
-        self.chunk_number
+    pub fn chunk(&self) -> &ChunkOffset {
+        &self.chunk_number
     }
 }
 
@@ -75,8 +64,8 @@ impl std::fmt::Display for UfoOffset {
         write!(
             f,
             "(UfoOffset {}@{})",
-            self.chunk_number(),
-            self.absolute_offset(),
+            self.chunk().absolute_offset().chunks,
+            self.offset().from_header().bytes,
         )
     }
 }

@@ -7,6 +7,7 @@ use crate::UfoWriteListenerEvent;
 
 use crate::mmap_wrapers::*;
 use crate::return_checks::*;
+use crate::sizes::*;
 use crate::ufo_core::*;
 
 use super::*;
@@ -28,13 +29,13 @@ impl std::cmp::Eq for UfoObject {}
 
 impl UfoObject {
     /// returns the number of DISK bytes freed (from the writeback utility)
-    pub(crate) fn reset_internal(&mut self) -> anyhow::Result<usize> {
-        let length = self.config.true_size_with_padding - self.config.header_size_with_padding;
+    pub(crate) fn reset_internal(&mut self) -> anyhow::Result<PageAlignedBytes> {
+        let length = self.config.aligned_body_size().aligned().bytes;
         unsafe {
             check_return_zero(libc::madvise(
                 self.mmap
                     .as_ptr()
-                    .add(self.config.header_size_with_padding)
+                    .add(self.config.header_size_with_padding.aligned().bytes)
                     .cast(),
                 length,
                 libc::MADV_DONTNEED,
@@ -48,7 +49,12 @@ impl UfoObject {
     }
 
     pub fn header_ptr(&self) -> *mut std::ffi::c_void {
-        let header_offset = self.config.header_size_with_padding - self.config.header_size;
+        let header_offset = self
+            .config
+            .header_size_with_padding
+            .aligned()
+            .sub(&self.config.header_size)
+            .bytes;
         unsafe { self.mmap.as_ptr().add(header_offset).cast() }
     }
 
@@ -56,7 +62,7 @@ impl UfoObject {
         unsafe {
             self.mmap
                 .as_ptr()
-                .add(self.config.header_size_with_padding)
+                .add(self.config.header_size_with_padding.aligned().bytes)
                 .cast()
         }
     }

@@ -10,6 +10,7 @@ use crate::populate_workers::PopulateWorkers;
 use crate::UfoEventSender;
 
 use crate::mmap_wrapers::*;
+use crate::sizes::*;
 
 use super::*;
 
@@ -27,14 +28,14 @@ fn allocate_impl(
         elements_loaded_at_once: {},
         element_ct: {},
      }}",
-        config.header_size,
-        config.stride,
+        config.header_size.bytes,
+        config.stride.alignment_quantum().bytes,
 
-        config.header_size_with_padding,
-        config.true_size_with_padding,
+        config.header_size_with_padding.aligned().bytes,
+        config.true_size_with_padding.total().aligned().bytes,
 
-        config.elements_loaded_at_once,
-        config.element_ct,
+        config.elements_loaded_at_once.alignment_quantum().elements,
+        config.element_ct.total().elements,
     );
 
     let state = &mut *this.get_locked_state()?;
@@ -49,15 +50,15 @@ fn allocate_impl(
 
     debug!(target: "ufo_core", "allocate {:?}: {} elements with stride {} [pad|header⋮body] [{}|{}⋮{}]",
         id,
-        config.element_ct,
-        config.stride,
-        config.header_size_with_padding - config.header_size,
-        config.header_size,
-        config.stride * config.element_ct,
+        config.element_ct.total().elements,
+        config.stride.alignment_quantum().bytes,
+        config.header_size_with_padding.aligned().bytes - config.header_size.bytes,
+        config.header_size.bytes,
+        config.body_size().total().bytes,
     );
 
     let mmap = BaseMmap::new(
-        config.true_size_with_padding,
+        config.true_size_with_padding.total().aligned().bytes,
         &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
         &[MmapFlag::Anonymous, MmapFlag::Private, MmapFlag::NoReserve],
         None,
@@ -69,31 +70,37 @@ fn allocate_impl(
     let mmap_base = mmap_ptr as usize;
     let segment = Range {
         start: mmap_base,
-        end: mmap_base + true_size,
+        end: mmap_base + true_size.total().aligned().bytes,
     };
 
-    debug!(target: "ufo_core", "mmapped {:#x} - {:#x}", mmap_base, mmap_base + true_size);
+    debug!(target: "ufo_core", "mmapped {:#x} - {:#x}", 
+        mmap_base, mmap_base + true_size.total().aligned().bytes);
 
     let writeback = UfoFileWriteback::new(id, &config, this)?;
-    this.uffd.register(mmap_ptr.cast(), true_size)?;
+    this.uffd
+        .register(mmap_ptr.cast(), true_size.total().aligned().bytes)?;
 
     //Pre-zero the header, that isn't part of our populate duties
-    if config.header_size_with_padding > 0 {
+    if config.header_size_with_padding.aligned().bytes > 0 {
         unsafe {
-            this.uffd
-                .zeropage(mmap_ptr.cast(), config.header_size_with_padding, true)
+            this.uffd.zeropage(
+                mmap_ptr.cast(),
+                config.header_size_with_padding.aligned().bytes,
+                true,
+            )
         }?;
     }
 
     let ufo_event = UfoEvent::AllocateUfo {
         ufo_id: id.0,
 
-        intended_body_size: config.element_ct() * config.stride(),
-        intended_header_size: config.header_size(),
+        intended_body_size: config.element_ct().total().elements
+            * config.stride().alignment_quantum().bytes,
+        intended_header_size: config.header_size().bytes,
 
-        header_size_with_padding: config.header_size_with_padding,
-        body_size_with_padding: config.true_size_with_padding - config.header_size_with_padding,
-        total_size_with_padding: config.true_size_with_padding,
+        header_size_with_padding: config.header_size_with_padding.aligned().bytes,
+        body_size_with_padding: config.aligned_body_size().aligned().bytes,
+        total_size_with_padding: config.true_size_with_padding.total().aligned().bytes,
 
         read_only: config.read_only(),
     };
@@ -143,7 +150,7 @@ fn reset_impl(
 
     event_sender.send_event(UfoEvent::UfoReset {
         ufo_id: ufo_id.0,
-        disk_freed,
+        disk_freed: disk_freed.aligned().bytes,
         memory_freed,
         chunks_freed,
     })?;
@@ -194,8 +201,10 @@ fn free_impl(
     let disk_freed = ufo.writeback_util.used_bytes();
     debug!(target: "ufo_core", "chunks dropped {:?}", ufo.id);
 
-    this.uffd
-        .unregister(ufo.mmap.as_ptr().cast(), config.true_size_with_padding)?;
+    this.uffd.unregister(
+        ufo.mmap.as_ptr().cast(),
+        config.true_size_with_padding.total().aligned().bytes,
+    )?;
     debug!(target: "ufo_core", "unregistered from uffd {:?}", ufo.id);
 
     let start_addr = segment.start.clone();
@@ -205,16 +214,16 @@ fn free_impl(
     event_sender.send_event(UfoEvent::FreeUfo {
         ufo_id: ufo_id.0,
 
-        intended_body_size: config.element_ct() * config.stride(),
-        intended_header_size: config.header_size(),
+        intended_body_size: config.body_size().total().bytes,
+        intended_header_size: config.header_size().bytes,
 
-        header_size_with_padding: config.header_size_with_padding,
-        body_size_with_padding: config.true_size_with_padding - config.header_size_with_padding,
-        total_size_with_padding: config.true_size_with_padding,
+        header_size_with_padding: config.header_size_with_padding.aligned().bytes,
+        body_size_with_padding: config.aligned_body_size().aligned().bytes,
+        total_size_with_padding: config.true_size_with_padding.total().aligned().bytes,
 
         memory_freed,
         chunks_freed,
-        disk_freed,
+        disk_freed: disk_freed.aligned().bytes,
     })?;
     debug!(target: "ufo_core", "sent free event {:?}", ufo.id);
 

@@ -4,7 +4,7 @@ use itertools::Itertools;
 use log::debug;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
-use crate::{ufo_core::chunk_freer::ChunkFreer, UfoEventSender};
+use crate::{sizes::AbsoluteOffset, ufo_core::chunk_freer::ChunkFreer, UfoEventSender};
 
 use super::*;
 
@@ -73,7 +73,7 @@ impl UfoChunks {
 
         debug!(target: "ufo_core", "Freeing chunks {}", {
             let names  = to_free.iter()
-                .map(|c| format!("{:?}@{}", c.ufo_id(), c.offset().chunk_number()));
+                .map(|c| format!("{:?}@{}", c.ufo_id(), c.offset().chunk().absolute_offset().chunks));
             // currently an unstable feature in the std lib, use itertools
             Itertools::intersperse(names, ", ".to_string())
                 .collect::<String>()

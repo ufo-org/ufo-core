@@ -7,6 +7,7 @@ use std::fmt::Display;
 use thiserror::Error;
 
 use crate::experimental_compat::thread_id_u64;
+use crate::sizes::*;
 
 pub(crate) struct BitGuard<'a> {
     idx: usize,
@@ -99,7 +100,8 @@ impl Bitlock {
         0 == bit & target.fetch_or(bit, Ordering::Acquire)
     }
 
-    pub fn lock_uncontended(&self, idx: usize) -> Result<BitGuard, BitlockErr> {
+    pub fn lock_uncontended(&self, idx: Chunks) -> Result<BitGuard, BitlockErr> {
+        let idx = idx.chunks;
         let mapped_idx = self.map_index(idx)?;
         let target = self.atomic_byte(&mapped_idx);
 
@@ -114,7 +116,8 @@ impl Bitlock {
         }
     }
 
-    pub fn spinlock(&self, idx: usize) -> Result<BitGuard, BitlockErr> {
+    pub fn spinlock(&self, idx: Chunks) -> Result<BitGuard, BitlockErr> {
+        let idx = idx.chunks;
         let mapped_idx = self.map_index(idx)?;
         let target = self.atomic_byte(&mapped_idx);
 
