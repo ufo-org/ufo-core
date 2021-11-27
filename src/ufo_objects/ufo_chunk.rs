@@ -4,8 +4,8 @@ use std::panic;
 use std::sync::{Arc, RwLock, RwLockReadGuard, Weak};
 
 use anyhow::Result;
-use num::Integer;
 
+use libc::c_void;
 use log::{debug, trace};
 
 use crate::events::{UfoEvent, UfoUnloadDisposition};
@@ -66,7 +66,7 @@ impl UfoChunk {
         &mut self,
         event_queue: &UfoEventSender,
         pivot: &BaseMmap,
-    ) -> Result<usize> {
+    ) -> Result<PageAlignedBytes> {
         match (self.length, self.object.upgrade()) {
             (Some(length), Some(obj)) => {
                 let length_bytes = length.bytes;
@@ -76,7 +76,7 @@ impl UfoChunk {
                     .map_err(|_| anyhow::anyhow!("UFO {:?} lock poisoned", self.ufo_id()))?;
 
                 trace!(target: "ufo_object", "free chunk {:?}@{} ({}b / {}pageBytes)",
-                    self.ufo_id, self.offset(), length_bytes, length_page_multiple
+                    self.ufo_id, self.offset(), length_bytes, length_page_multiple.aligned().bytes
                 );
 
                 if !obj.config.should_try_writeback() {
@@ -87,7 +87,7 @@ impl UfoChunk {
                         let data_ptr = obj.mmap.as_ptr().add(offset_bytes);
                         check_return_zero(libc::madvise(
                             data_ptr.cast(),
-                            length_page_multiple,
+                            length_page_multiple.aligned().bytes,
                             libc::MADV_DONTNEED,
                         ))?;
                     }
@@ -95,7 +95,7 @@ impl UfoChunk {
                         .send_event(UfoEvent::UnloadChunk {
                             ufo_id: self.ufo_id.0,
                             disposition: UfoUnloadDisposition::ReadOnly,
-                            memory_freed: length_page_multiple,
+                            memory_freed: length_page_multiple.aligned().bytes,
                         })
                         .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
                     return Ok(length_page_multiple);
@@ -111,15 +111,21 @@ impl UfoChunk {
                 // we check the value of the page after the remap because the remap
                 //  is atomic and will let us read cleanly in the face of racing writers
                 let chunk_number = self.offset.chunk().absolute_offset();
-                debug!("try to uncontended-lock {:?}.{}", obj.id, self.offset());
+
+                assert_eq!(
+                    chunk_number, 
+                    obj.config.chunk_size().align_down(&self.offset().offset().from_header()).as_chunks()
+                );
+
+                debug!("try to uncontended-lock {:?}@{}", obj.id, self.offset());
                 let chunk_lock = obj
                     .writeback_util
                     .chunk_locks
                     .lock_uncontended(chunk_number)
                     .unwrap();
-                trace!("locked {:?}@{}", obj.id, self.offset());
+                    trace!("locked {:?}@{}", obj.id, self.offset());
                 unsafe {
-                    anyhow::ensure!(length_page_multiple <= pivot.length(), "Pivot too small");
+                    anyhow::ensure!(length_page_multiple.aligned().bytes <= pivot.length(), "Pivot too small");
                     let data_ptr = obj
                         .mmap
                         .as_ptr()
@@ -127,10 +133,10 @@ impl UfoChunk {
                     let pivot_ptr = pivot.as_ptr();
                     check_ptr_nonneg(libc::mremap(
                         data_ptr.cast(),
-                        length_page_multiple,
-                        length_page_multiple,
+                        length_page_multiple.aligned().bytes,
+                        length_page_multiple.aligned().bytes,
                         libc::MREMAP_FIXED | libc::MREMAP_MAYMOVE | libc::MREMAP_DONTUNMAP,
-                        pivot_ptr,
+                        pivot_ptr.cast::<*mut c_void>(),
                     ))?;
                     trace!(target: "ufo_object", "{:?}@{} mremaped data to pivot", self.ufo_id, self.offset());
                 }
@@ -187,17 +193,17 @@ impl UfoChunk {
                     .send_event(UfoEvent::UnloadChunk {
                         ufo_id: self.ufo_id.0,
                         disposition: unload_disposition,
-                        memory_freed: length_page_multiple,
+                        memory_freed: length_page_multiple.aligned().bytes,
                     })
                     .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
 
                 self.length = None;
                 trace!("unlock free {:?}@{}", obj.id, self.offset());
-                chunk_lock.unlock();
+                chunk_lock.droplockster();
                 // return page multiple of bytes since memory is consumed by the page
                 Ok(length_page_multiple)
             }
-            _ => Ok(0),
+            _ => Ok(ToPage.align_down(&Bytes::from(0))),
         }
     }
 
@@ -264,11 +270,11 @@ impl UfoChunk {
         self.ufo_id
     }
 
-    pub fn size(&self) -> usize {
-        self.length.map(|l| l.bytes).unwrap_or(0)
+    pub fn size(&self) -> Bytes {
+        self.length.unwrap_or(Bytes::from(0))
     }
 
-    pub(crate) fn size_in_page_bytes(&self) -> usize {
-        self.size().next_multiple_of(&crate::get_page_size())
+    pub(crate) fn size_in_page_bytes(&self) -> PageAlignedBytes {
+        ToPage.align_up(&self.size())
     }
 }

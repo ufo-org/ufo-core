@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use log::{debug, trace};
 
+use crate::bitset::AtomicBitset;
 use crate::bitwise_spinlock::{BitGuard, Bitlock};
 
 use crate::math::*;
@@ -13,15 +14,6 @@ use crate::sizes::*;
 use crate::ufo_core::*;
 
 use super::*;
-
-// someday make this atomic_from_mut
-fn atomic_bitset(target: &mut u8, mask: u8) -> u8 {
-    unsafe {
-        let t = &mut *(target as *mut u8 as *mut AtomicU8);
-        t.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some(x | mask))
-            .unwrap()
-    }
-}
 
 pub(crate) enum UfoWritebackAction {
     NewWriteback,
@@ -43,6 +35,7 @@ pub(crate) struct UfoFileWriteback {
     chunk_ct: Total<Chunks>,
     final_chunk_size: Bytes,
     pub(crate) chunk_locks: Bitlock,
+    chunk_flags: AtomicBitset,
     chunk_size: ToChunk<Bytes>,
     total_bytes: Total<PageAlignedBytes>,
     body_bytes: Total<Bytes>,
@@ -80,10 +73,8 @@ impl UfoFileWriteback {
                 .bytes
         );
 
-        let trailing_elements = elements_at_once
-            .align_down(cfg.element_ct().total())
-            .aligned()
-            .sub(cfg.element_ct().total());
+        let trailing_elements = cfg.element_ct().total()
+            .sub(&elements_at_once.align_down(cfg.element_ct().total()).aligned());
 
         let final_chunk_size = if 0 == trailing_elements.elements {
             cfg.chunk_size().alignment_quantum()
@@ -127,7 +118,10 @@ impl UfoFileWriteback {
             0,
         )?;
 
+        let flag_ptr = mmap.as_ptr();
         let lock_ptr = unsafe { mmap.as_ptr().add(bitmap_bytes.aligned().bytes) };
+
+        let chunk_flags = AtomicBitset::new(flag_ptr, chunk_ct.total().chunks);
         let chunk_locks = Bitlock::new(lock_ptr, chunk_ct.total().chunks);
 
         let header_bytes = bitmap_bytes.add(&bitlock_bytes).aligned();
@@ -141,6 +135,7 @@ impl UfoFileWriteback {
             chunk_ct,
             chunk_size,
             chunk_locks,
+            chunk_flags,
             final_chunk_size,
             mmap,
             body_bytes: body_bytes.as_total(),
@@ -153,21 +148,15 @@ impl UfoFileWriteback {
         let chunk_ct = &self.chunk_ct;
         let last_chunk = chunk_ct.total().chunks - 1;
 
-        let bitmap_ptr = self.mmap.as_ptr();
         let mut sum: PageAlignedBytes = ToPage.align_down(&0.into());
         for x in 0..chunk_ct.total().chunks {
-            let byte = x >> 3;
-            let bit = x & 0b111;
-            let mask = 1 << bit;
-
             let size = if x == last_chunk {
                 ToPage.align_up(&self.final_chunk_size)
             } else {
                 ToPage.align_up(&self.chunk_size.alignment_quantum())
             };
 
-            let is_set = unsafe { *bitmap_ptr.add(byte) & mask } > 0;
-            if is_set {
+            if self.chunk_flags.test(x) {
                 sum = sum.add(&size);
             }
         }
@@ -198,14 +187,10 @@ impl UfoFileWriteback {
             self.chunk_size.align_down(&ufo_body_offset).as_chunks(),
             chunk_number
         );
-        let writeback_offset: Bytes = self.header_offset.relative(ufo_body_offset).from_header();
-        let chunk_byte = chunk_number.chunks >> 3;
-        let chunk_bit = 1u8 << (chunk_number.chunks & 0b111);
-        assert!(chunk_byte < (self.header_offset.header_size().bytes >> 1));
+        let file_writeback_offset: Bytes = self.header_offset.relative(ufo_body_offset).absolute_offset();
 
-        debug!(target: "ufo_object", "writeback offset {:#x}", writeback_offset.bytes);
+        debug!(target: "ufo_object", "writeback offset {:#x}", file_writeback_offset.bytes);
 
-        let bitmap_ptr: &mut u8 = unsafe { self.mmap.as_ptr().add(chunk_byte).as_mut().unwrap() };
         let expected_size: Bytes = std::cmp::min(
             self.chunk_size.alignment_quantum().bytes,
             self.body_bytes().total().bytes - ufo_body_offset.bytes,
@@ -223,17 +208,17 @@ impl UfoFileWriteback {
         // We aren't a mutable copy but writebacks never overlap and we hold the UFO read lock so a chunk cannot be loaded
         let writeback_arr: &mut [u8] = unsafe {
             std::slice::from_raw_parts_mut(
-                self.mmap.as_ptr().add(writeback_offset.bytes),
+                self.mmap.as_ptr().add(file_writeback_offset.bytes),
                 expected_size.bytes,
             )
         };
 
         writeback_arr.copy_from_slice(data);
-        let old_bits = atomic_bitset(bitmap_ptr, chunk_bit);
-        if 0 == chunk_bit & old_bits {
-            Ok(UfoWritebackAction::NewWriteback)
-        } else {
+        let was_set = self.chunk_flags.set(chunk_number.chunks);
+        if was_set {
             Ok(UfoWritebackAction::UpdateWriteback)
+        } else {
+            Ok(UfoWritebackAction::NewWriteback)
         }
     }
 
@@ -248,13 +233,7 @@ impl UfoFileWriteback {
         let chunk_number = self.chunk_size.align_down(&off_head).as_chunks();
         let readback_offset = self.header_offset.relative(off_head).from_header();
 
-        let chunk_byte = chunk_number.chunks >> 3;
-        let chunk_bit = 1u8 << (chunk_number.chunks & 0b111);
-
-        let bitmap_ptr: &u8 = unsafe { self.mmap.as_ptr().add(chunk_byte).as_ref().unwrap() };
-        let is_written = *bitmap_ptr & chunk_bit != 0;
-
-        if is_written {
+        if self.chunk_flags.test(chunk_number.chunks) {
             trace!(target: "ufo_object", "allow readback {:?}@{:#x}", self.ufo_id, off_head.bytes);
             let arr: &[u8] = unsafe {
                 std::slice::from_raw_parts(

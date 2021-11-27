@@ -151,8 +151,8 @@ fn reset_impl(
     event_sender.send_event(UfoEvent::UfoReset {
         ufo_id: ufo_id.0,
         disk_freed: disk_freed.aligned().bytes,
-        memory_freed,
-        chunks_freed,
+        memory_freed: memory_freed.aligned().bytes,
+        chunks_freed: chunks_freed.elements,
     })?;
 
     Ok(())
@@ -221,8 +221,8 @@ fn free_impl(
         body_size_with_padding: config.aligned_body_size().aligned().bytes,
         total_size_with_padding: config.true_size_with_padding.total().aligned().bytes,
 
-        memory_freed,
-        chunks_freed,
+        memory_freed: memory_freed.aligned().bytes,
+        chunks_freed: chunks_freed.elements,
         disk_freed: disk_freed.aligned().bytes,
     })?;
     debug!(target: "ufo_core", "sent free event {:?}", ufo.id);

@@ -10,7 +10,7 @@ use crate::experimental_compat::thread_id_u64;
 use crate::sizes::*;
 
 pub(crate) struct BitGuard<'a> {
-    idx: usize,
+    idx_chunks: Chunks,
     parent: &'a Bitlock,
 }
 
@@ -19,12 +19,13 @@ impl Drop for BitGuard<'_> {
         if std::thread::panicking() {
             self.parent.poisoned.store(true, Ordering::Release);
         }
+
         self.parent.unlock(self);
     }
 }
 
 impl BitGuard<'_> {
-    pub fn unlock(self) {
+    pub fn droplockster(self) {
         std::mem::drop(self);
     }
 }
@@ -76,49 +77,61 @@ impl Bitlock {
         unsafe { &mut *(self.base.add(idx.byte_idx) as *mut u8 as *mut AtomicU8) }
     }
 
-    fn map_index(&self, idx: usize) -> Result<MappedIdx, BitlockErr> {
-        if idx >= self.size_bits {
-            Err(BitlockErr::OutOfBounds(idx, self.size_bits))
+    fn map_index(&self, idx: Chunks) -> Result<MappedIdx, BitlockErr> {
+        if idx.chunks >= self.size_bits {
+            Err(BitlockErr::OutOfBounds(idx.chunks, self.size_bits))
         } else {
-            let mapped = (idx * self.coprime_multiplier) % self.size_bits;
+            let mapped = idx.chunks.wrapping_mul(self.coprime_multiplier) % self.size_bits;
+
+            let byte_idx =  mapped >> 3;
+            assert!(byte_idx < self.size_bits);
+
+            let bit = 1 << (mapped & 0b111);
+            assert!(1 == u8::count_ones(bit));
+
             Ok(MappedIdx {
-                byte_idx: mapped >> 3,
-                bit: 1 << (mapped & 0b111),
+                byte_idx,
+                bit,
             })
         }
     }
 
     fn unlock(&self, guard: &BitGuard) {
-        let mapped_idx = self.map_index(guard.idx).expect("locked an invlid bit?");
+        let mapped_idx = self.map_index(guard.idx_chunks).expect("locked an invlid bit?");
         let target = self.atomic_byte(&mapped_idx);
+
         let inv_bit = !mapped_idx.bit;
         debug_assert_eq!(inv_bit | mapped_idx.bit, 0xff);
-        target.fetch_and(inv_bit, Ordering::Release);
+        let prev = target.fetch_and(inv_bit, Ordering::Release);
+        debug_assert!(prev & mapped_idx.bit != 0, 
+            "{} wasn't locked {:08b} & {:08b} → {:08b}\nThis should be impossible",
+            guard.idx_chunks.chunks, prev, mapped_idx.bit, prev & mapped_idx.bit);
     }
 
-    fn try_lock(target: &mut AtomicU8, bit: u8) -> bool {
-        0 == bit & target.fetch_or(bit, Ordering::Acquire)
+    fn try_lock(target: &mut AtomicU8, idx: &MappedIdx) -> bool {
+        let previous = target.fetch_or(idx.bit, Ordering::Acquire);
+        0 == (idx.bit & previous)
     }
 
-    pub fn lock_uncontended(&self, idx: Chunks) -> Result<BitGuard, BitlockErr> {
-        let idx = idx.chunks;
-        let mapped_idx = self.map_index(idx)?;
+    pub fn lock_uncontended(&self, idx_chunks: Chunks) -> Result<BitGuard, BitlockErr> {
+        let idx = idx_chunks.chunks;
+        let mapped_idx = self.map_index(idx_chunks)?;
         let target = self.atomic_byte(&mapped_idx);
 
         if self.poisoned.load(Ordering::Relaxed) {
             return Err(BitlockErr::PoisonErr(idx));
         }
 
-        if Self::try_lock(target, mapped_idx.bit) {
-            Ok(BitGuard { idx, parent: self })
+        if Self::try_lock(target, &mapped_idx) {
+            Ok(BitGuard { idx_chunks, parent: self})
         } else {
             Err(BitlockErr::Contended(idx))
         }
     }
 
-    pub fn spinlock(&self, idx: Chunks) -> Result<BitGuard, BitlockErr> {
-        let idx = idx.chunks;
-        let mapped_idx = self.map_index(idx)?;
+    pub fn spinlock(&self, idx_chunks: Chunks) -> Result<BitGuard, BitlockErr> {
+        let idx = idx_chunks.chunks;
+        let mapped_idx = self.map_index(idx_chunks)?;
         let target = self.atomic_byte(&mapped_idx);
 
         let seed = (idx as u64).wrapping_add(thread_id_u64(std::thread::current().id()));
@@ -130,8 +143,8 @@ impl Bitlock {
                 return Err(BitlockErr::PoisonErr(idx));
             }
 
-            if Self::try_lock(target, mapped_idx.bit) {
-                return Ok(BitGuard { idx, parent: self });
+            if Self::try_lock(target, &mapped_idx) {
+                return Ok(BitGuard { idx_chunks, parent: self });
             }
 
             loop {

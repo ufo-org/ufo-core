@@ -72,11 +72,20 @@ where
     Self: ReadableUnit<Unit = Self> + From<usize>,
 {
     fn add(&self, other: &Self) -> Self {
-        (self.read_raw_unit() + other.read_raw_unit()).into()
+        let a = self.read_raw_unit() as u128;
+        let b = other.read_raw_unit() as u128;
+
+        let c = a + b;
+        assert!(c < usize::MAX as u128, "a + b > usize::MAX");
+        (c as usize).into()
     }
 
     fn sub(&self, other: &Self) -> Self {
-        (self.read_raw_unit() - other.read_raw_unit()).into()
+        let a = self.read_raw_unit();
+        let b = other.read_raw_unit();
+        assert!(a >= b, "{} < {}", a, b);
+
+        (a - b).into()
     }
 }
 
@@ -84,7 +93,7 @@ impl<T> AddReadable for T where T: ReadableUnit<Unit = Self> + From<usize> {}
 
 /* Alignment */
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct ToStride<U> {
     chunk_size: U,
 }
@@ -106,7 +115,7 @@ impl ToStride<Bytes> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct ToChunk<U> {
     chunk_size: U,
 }
@@ -134,8 +143,17 @@ where
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct ToPage;
+
+impl ToPage {
+    pub fn zero() -> PageAlignedBytes{
+        Aligned{
+            alignment: ToPage,
+            unit: 0.into()
+        }
+    }
+}
 
 pub trait Alignable<R, U = R>
 where
@@ -192,7 +210,7 @@ impl Alignable<Elements> for ToChunk<Elements> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Aligned<U, A>
 where
     A: Copy,
@@ -212,9 +230,25 @@ where
     }
 
     pub fn add(&self, other: &Self) -> Self {
-        let total = self.aligned().read_raw_unit() + other.aligned().read_raw_unit();
+        let a = self.aligned().read_raw_unit() as u128;
+        let b = other.aligned().read_raw_unit() as u128;
+
+        let c = a + b;
+        assert!(c < usize::MAX as u128, "a + b > usize::MAX");
+
         Aligned {
-            unit: total.into(),
+            unit: (c as usize).into(),
+            alignment: self.alignment,
+        }
+    }
+
+    pub fn sub(&self, other: &Self) -> Self {
+        let a = self.aligned().read_raw_unit();
+        let b = other.aligned().read_raw_unit();
+        assert!(a > b, "{} < {}", a, b);
+
+        Aligned {
+            unit: (a - b).into(),
             alignment: self.alignment,
         }
     }
@@ -330,7 +364,7 @@ where
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Offset<U, B>
 where
     U: Copy,
@@ -392,7 +426,7 @@ where
 /*
    From Base [Address]
 */
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct FromBase<U> {
     base: U,
 }
@@ -487,7 +521,7 @@ where
    From Header (Body)
 */
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct FromHeader<U, B>
 where
     B: HasBase<U>,

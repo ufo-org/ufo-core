@@ -8,6 +8,7 @@
 // )]
 
 mod bitwise_spinlock;
+mod bitset;
 mod errors;
 mod events;
 mod experimental_compat;
