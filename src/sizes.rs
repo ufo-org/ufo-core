@@ -245,7 +245,7 @@ where
     pub fn sub(&self, other: &Self) -> Self {
         let a = self.aligned().read_raw_unit();
         let b = other.aligned().read_raw_unit();
-        assert!(a > b, "{} < {}", a, b);
+        assert!(a >= b, "{} < {}", a, b);
 
         Aligned {
             unit: (a - b).into(),
@@ -284,7 +284,7 @@ where
 }
 
 pub type PageAlignedBytes = Aligned<Bytes, ToPage>;
-// pub type ChunkAlignedBytes = Aligned<Bytes, ToChunk<Bytes>>;
+pub type ChunkAlignedBytes = Aligned<Bytes, ToChunk<Bytes>>;
 
 /* Bounds */
 

@@ -231,7 +231,7 @@ impl UfoFileWriteback {
         trace!(target: "ufo_object", "try readback {:?}@{:#x}", self.ufo_id, off_head.bytes);
 
         let chunk_number = self.chunk_size.align_down(&off_head).as_chunks();
-        let readback_offset = self.header_offset.relative(off_head).from_header();
+        let readback_offset = self.header_offset.relative(off_head).absolute_offset();
 
         if self.chunk_flags.test(chunk_number.chunks) {
             trace!(target: "ufo_object", "allow readback {:?}@{:#x}", self.ufo_id, off_head.bytes);

@@ -25,30 +25,32 @@ fn populate_impl(
     // fn droplockster<T>(_: T){}
     let mut state = core.get_locked_state().unwrap();
 
-    let ptr_int = addr as usize;
+    let ptr_int = Bytes::from(addr as usize);
 
     // blindly unwrap here because if we get a message for an address we don't have then it is explodey time
     // clone the arc so we aren't borrowing the state
-    let ufo_arc = state.objects_by_segment.get(&ptr_int).unwrap().clone();
+    let ufo_arc = state.objects_by_segment.get(&ptr_int.bytes).unwrap().clone();
     let ufo = ufo_arc.read().unwrap();
 
-    let fault_offset = UfoOffset::from_addr(ufo.deref(), addr);
-
+    let ufo_offset = UfoOffset::from_addr(ufo.deref(), addr);
     let config = &ufo.config;
 
     let full_chunk_load_size = config.chunk_size().alignment_quantum();
     let populate_offset = config
         .chunk_size()
-        .align_down(&fault_offset.offset().from_header());
+        .align_down(&ufo_offset.offset().from_header());
     assert!(
-        fault_offset.offset().from_header().bytes - populate_offset.aligned().bytes
+        ufo_offset.offset().from_header().bytes - populate_offset.aligned().bytes
             < full_chunk_load_size.bytes,
         "incorrect chunk calculated for populate"
     );
-    let populate_offset = fault_offset
-        .offset()
-        .basis()
-        .relative(populate_offset.aligned());
+
+    let offset_basis = ufo.offset_basis();
+    let raw_offset = offset_basis.with_absolute(ptr_int);
+    let aligned_offset = ufo.config.chunk_size().align_down(&raw_offset.from_header());
+    assert!(aligned_offset.aligned().bytes <= raw_offset.from_header().bytes);
+    assert!(aligned_offset.aligned().bytes < ufo.config.body_size().total().bytes);
+    let populate_offset = offset_basis.relative(aligned_offset.aligned());
 
     let start = config
         .stride()
@@ -75,10 +77,20 @@ fn populate_impl(
     debug!(target: "ufo_core", "fault at {}, populate {} bytes at {:#x}",
         start.elements, config.stride.as_bytes(&pop_ct).bytes, populate_offset.absolute_offset().bytes );
 
-    let ufo_offset = UfoOffset::from_addr(&ufo, addr);
+    assert_eq!(
+        populate_offset.from_header(),
+        ufo.config.stride().as_bytes(&start),
+        "inequal offsets calculated {:x} != {:x}",
+        populate_offset.from_header().bytes,
+        ufo.config.stride().as_bytes(&start).bytes,
+    );
+
     assert_eq!(
         populate_offset.absolute_offset(),
-        ufo_offset.offset().absolute_offset()
+        ufo_offset.offset().absolute_offset(),
+        "inequal offsets calculated {:x} != {:x}",
+        populate_offset.absolute_offset().bytes,
+        ufo_offset.offset().absolute_offset().bytes,
     );
 
     let chunk = UfoChunk::new(&ufo_arc, &ufo, ufo_offset, populate_size);

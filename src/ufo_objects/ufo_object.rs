@@ -48,6 +48,11 @@ impl UfoObject {
         Ok(writeback_bytes_freed)
     }
 
+    pub(crate) fn offset_basis(&self) -> FromHeader<Bytes, FromBase<Bytes>> {
+        Absolute::with_base(Bytes::from(self.mmap.as_ptr() as usize))
+            .with_header(self.config.header_size_with_padding.aligned())
+    }
+
     pub fn header_ptr(&self) -> *mut std::ffi::c_void {
         let header_offset = self
             .config

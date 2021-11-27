@@ -9,10 +9,15 @@ pub(crate) struct UfoOffset {
 
 impl UfoOffset {
     pub fn from_addr(ufo: &UfoObject, addr: *const libc::c_void) -> UfoOffset {
-        let base_addr = FromBase::new((ufo.mmap.as_ptr() as usize).into());
-        let header_base = base_addr.with_header(ufo.config.header_size_with_padding.aligned());
+        let header_base = ufo.offset_basis();
 
-        let offset: BodyOffsetBytes = header_base.with_absolute((addr as usize).into());
+        let raw_offset: BodyOffsetBytes = header_base.with_absolute((addr as usize).into());
+        let aligned_offset: ChunkAlignedBytes = ufo.config.chunk_size().align_down(&raw_offset.from_header());
+        let aligned_offset = aligned_offset.aligned();
+        let offset = header_base.relative(aligned_offset);
+
+        assert!(offset.absolute_offset().bytes % crate::get_page_size() == 0, "bad memory alignment");
+        assert!(offset.from_header().bytes % crate::get_page_size() == 0, "should be impossible, bad body alignment");
 
         assert!(
             offset.absolute_offset().bytes
@@ -35,7 +40,7 @@ impl UfoOffset {
             .as_elements();
         let index_floor = ufo.config.elements_loaded_at_once().align_down(&index);
 
-        let chunk_number = Offset::absolute(chunk_number.into());
+        let chunk_number = Offset::absolute(chunk_number);
         let index_floor = Offset::absolute(index_floor);
 
         UfoOffset {
