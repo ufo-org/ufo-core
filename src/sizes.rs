@@ -264,7 +264,7 @@ where
     fn bound(&self, u: R) -> Bounded<U, Self> {
         let u = u.read_raw_unit();
 
-        let bounded = u.max(self.total().read_raw_unit()).into();
+        let bounded = u.min(self.total().read_raw_unit()).into();
         Bounded {
             unit: bounded,
             _bound: PhantomData,

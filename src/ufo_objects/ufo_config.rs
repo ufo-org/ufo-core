@@ -53,8 +53,7 @@ impl UfoObjectConfig {
         self.read_only
     }
     pub fn body_size(&self) -> Total<Bytes> {
-        let bytes = self.element_ct.total().elements * self.stride.alignment_quantum().bytes;
-        Bytes::from(bytes).as_total()
+        self.stride.as_bytes(self.element_ct.total()).as_total()
     }
 
     pub fn aligned_body_size(&self) -> PageAlignedBytes {

@@ -54,13 +54,13 @@ impl UfoCore {
 
             let config = &ufo.config;
 
-            let load_size = config.chunk_size().alignment_quantum();
+            let full_chunk_load_size = config.chunk_size().alignment_quantum();
             let populate_offset = config
                 .chunk_size()
                 .align_down(&fault_offset.offset().from_header());
             assert!(
                 fault_offset.offset().from_header().bytes - populate_offset.aligned().bytes
-                    < load_size.bytes,
+                    < full_chunk_load_size.bytes,
                 "incorrect chunk calculated for populate"
             );
             let populate_offset = fault_offset
@@ -79,7 +79,7 @@ impl UfoCore {
             let populate_size = config.stride.as_bytes(&pop_ct);
             assert_eq!(
                 min(
-                    load_size.bytes,
+                    full_chunk_load_size.bytes,
                     config
                         .body_size()
                         .total()
@@ -133,9 +133,9 @@ impl UfoCore {
                     trace!(target: "ufo_core", "calculate");
                     from_writeback = false;
                     unsafe {
-                        buffer.ensure_capcity(load_size.bytes);
+                        buffer.ensure_capcity(full_chunk_load_size.bytes);
                         (config.populate)(start.elements, pop_end.elements, buffer.ptr)?;
-                        Ok(&buffer.slice()[0..load_size.bytes])
+                        Ok(&buffer.slice()[0..full_chunk_load_size.bytes])
                     }
                 })?;
             trace!(target: "ufo_core", "data ready");
@@ -158,7 +158,7 @@ impl UfoCore {
                 loaded_from_writeback: from_writeback,
             })?;
 
-            assert!(raw_data.len() == load_size.bytes);
+            assert!(raw_data.len() == full_chunk_load_size.bytes);
             let hash_fulfiller = chunk.hash_fulfiller();
 
             let mut state = core.get_locked_state().unwrap();
