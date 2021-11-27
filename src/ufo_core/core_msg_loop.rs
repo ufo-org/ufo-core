@@ -66,7 +66,7 @@ fn allocate_impl(
     .expect("Mmap Error");
 
     let mmap_ptr = mmap.as_ptr();
-    let true_size = config.true_size_with_padding;
+    let true_size = &config.true_size_with_padding;
     let mmap_base = mmap_ptr as usize;
     let segment = Range {
         start: mmap_base,

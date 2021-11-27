@@ -3,7 +3,7 @@ use crate::{sizes::*, UfoObject};
 pub(crate) struct UfoOffset {
     chunk_number: ChunkOffset,
     index_floor: ChunkAlignedElements,
-    stride: ToStride<Bytes>,
+    // stride: ToStride<Bytes>,
     offset: BodyOffsetBytes,
 }
 
@@ -41,7 +41,7 @@ impl UfoOffset {
         UfoOffset {
             chunk_number,
             index_floor,
-            stride: ufo.config.stride,
+            // stride: ufo.config.stride,
             offset,
         }
     }

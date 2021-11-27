@@ -17,7 +17,7 @@ mod once_await;
 mod populate_workers;
 // mod ptr_hiding;
 mod return_checks;
-mod sizes;
+pub mod sizes;
 mod ufo_core;
 mod ufo_objects;
 mod write_buffer;

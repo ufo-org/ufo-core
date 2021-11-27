@@ -141,7 +141,7 @@ pub trait Alignable<R, U = R>
 where
     Self: Sized + Copy,
     R: ReadableUnit<Unit = U>,
-    U: From<usize> + ReadableUnit<Unit = U>,
+    U: From<usize> + ReadableUnit<Unit = U> + Copy,
 {
     fn alignment_quantum(&self) -> U;
 
@@ -192,9 +192,11 @@ impl Alignable<Elements> for ToChunk<Elements> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Aligned<U, A>
 where
-    U: From<usize>,
+    A: Copy,
+    U: From<usize> + Copy,
 {
     unit: U,
     alignment: A,
@@ -202,7 +204,8 @@ where
 
 impl<U, A> Aligned<U, A>
 where
-    U: From<usize> + ReadableUnit,
+    A: Copy,
+    U: From<usize> + ReadableUnit + Copy,
 {
     pub fn aligned(&self) -> U {
         self.unit
@@ -237,7 +240,8 @@ impl Aligned<Elements, ToChunk<Elements>> {
 
 impl<U, A> ReadableUnit for Aligned<U, A>
 where
-    U: ReadableUnit + From<usize>,
+    A: Copy,
+    U: ReadableUnit + From<usize> + Copy,
 {
     type Unit = U;
     fn read_raw_unit(&self) -> usize {
@@ -246,14 +250,14 @@ where
 }
 
 pub type PageAlignedBytes = Aligned<Bytes, ToPage>;
-pub type ChunkAlignedBytes = Aligned<Bytes, ToChunk<Bytes>>;
+// pub type ChunkAlignedBytes = Aligned<Bytes, ToChunk<Bytes>>;
 
 /* Bounds */
 
 pub trait Bound<R, U>
 where
     R: ReadableUnit<Unit = U>,
-    U: ReadableUnit<Unit = U> + From<usize>,
+    U: ReadableUnit<Unit = U> + From<usize> + Copy,
 {
     fn total(&self) -> &R;
 
@@ -289,7 +293,7 @@ impl<R> AsTotal for R where R: ReadableUnit {}
 impl<R, U> Bound<R, U> for Total<R>
 where
     R: ReadableUnit<Unit = U>,
-    U: ReadableUnit<Unit = U> + From<usize>,
+    U: ReadableUnit<Unit = U> + From<usize> + Copy,
 {
     fn total(&self) -> &R {
         &self.total
@@ -298,13 +302,17 @@ where
 
 pub struct Bounded<U, B>
 where
+    U: Copy,
     B: ?Sized,
 {
     unit: U,
     _bound: PhantomData<B>,
 }
 
-impl<U, B> Bounded<U, B> {
+impl<U, B> Bounded<U, B>
+where
+    U: Copy,
+{
     pub fn bounded(&self) -> U {
         self.unit
     }
@@ -313,7 +321,7 @@ impl<U, B> Bounded<U, B> {
 impl<U, B> ReadableUnit for Bounded<U, B>
 where
     B: ?Sized,
-    U: ReadableUnit + From<usize>,
+    U: ReadableUnit + From<usize> + Copy,
 {
     type Unit = U;
 
@@ -323,12 +331,18 @@ where
 }
 
 #[derive(Copy, Clone)]
-pub struct Offset<U, B> {
+pub struct Offset<U, B>
+where
+    U: Copy,
+{
     basis: B,
     absolute_offset: U,
 }
 
-impl<U, B> Offset<U, B> {
+impl<U, B> Offset<U, B>
+where
+    U: Copy,
+{
     pub fn basis(&self) -> &B {
         &self.basis
     }
@@ -356,13 +370,17 @@ impl HasAbsolute for Absolute {}
 impl<U, B> AbsoluteOffset<U> for Offset<U, B>
 where
     B: HasAbsolute,
+    U: Copy,
 {
     fn absolute_offset(&self) -> U {
         self.absolute_offset
     }
 }
 
-impl<U> Offset<U, Absolute> {
+impl<U> Offset<U, Absolute>
+where
+    U: Copy,
+{
     pub fn absolute(offset: U) -> Self {
         Offset {
             basis: Absolute,
@@ -394,7 +412,10 @@ where
 }
 
 impl<U> HasAbsolute for FromBase<U> {}
-impl<U> HasBase<U> for FromBase<U> {
+impl<U> HasBase<U> for FromBase<U>
+where
+    U: Copy,
+{
     fn base(&self) -> U {
         self.base
     }
@@ -402,8 +423,8 @@ impl<U> HasBase<U> for FromBase<U> {
 
 impl<U, B> OffsetFromBase<U> for Offset<U, B>
 where
-    U: ReadableUnit + From<usize>,
     B: HasBase<U>,
+    U: ReadableUnit + From<usize> + Copy,
 {
     fn from_base(&self) -> U {
         let base = self.basis.base().read_raw_unit();
@@ -412,48 +433,54 @@ where
     }
 }
 
-impl<U> Offset<U, Absolute> {
-    pub fn with_base(&self, base: U) -> Offset<U, FromBase<U>> {
-        Offset {
-            basis: FromBase { base },
-            absolute_offset: self.absolute_offset(),
-        }
-    }
+impl<U> Offset<U, Absolute>
+where
+    U: Copy,
+{
+    // pub fn with_base(&self, base: U) -> Offset<U, FromBase<U>> {
+    //     Offset {
+    //         basis: FromBase { base },
+    //         absolute_offset: self.absolute_offset(),
+    //     }
+    // }
 }
 
-impl<U> FromBase<U> {
+impl<U> FromBase<U>
+where
+    U: Copy,
+{
     pub fn new(base: U) -> Self {
         FromBase { base }
     }
 
     pub fn with_header(&self, header_size: U) -> FromHeader<U, Self> {
-        let base = *self.clone();
+        let base = self.clone();
         FromHeader { base, header_size }
     }
 
-    pub fn with_absolute(&self, absolute_offset: U) -> Offset<U, Self> {
-        let basis = *self.clone();
-        Offset {
-            basis,
-            absolute_offset,
-        }
-    }
+    // pub fn with_absolute(&self, absolute_offset: U) -> Offset<U, Self> {
+    //     let basis = self.clone();
+    //     Offset {
+    //         basis,
+    //         absolute_offset,
+    //     }
+    // }
 }
 
 impl<U> FromBase<U>
 where
-    U: ReadableUnit + From<usize>,
+    U: ReadableUnit + From<usize> + Copy,
 {
-    pub fn relative(&self, relative_offset: U) -> Offset<U, Self> {
-        let relative_offset = relative_offset.read_raw_unit();
-        let base = self.base().read_raw_unit();
-        let absolute_offset = (relative_offset + base).into();
-        let basis = *self.clone();
-        Offset {
-            basis,
-            absolute_offset,
-        }
-    }
+    // pub fn relative(&self, relative_offset: U) -> Offset<U, Self> {
+    //     let relative_offset = relative_offset.read_raw_unit();
+    //     let base = self.base().read_raw_unit();
+    //     let absolute_offset = (relative_offset + base).into();
+    //     let basis = self.clone();
+    //     Offset {
+    //         basis,
+    //         absolute_offset,
+    //     }
+    // }
 }
 
 /*
@@ -495,6 +522,7 @@ where
 impl<U, B> HasHeader<U> for FromHeader<U, B>
 where
     B: HasBase<U>,
+    U: Copy,
 {
     fn header_size(&self) -> U {
         self.header_size
@@ -503,8 +531,8 @@ where
 
 impl<U, H> OffsetFromHeader<U> for Offset<U, H>
 where
-    U: ReadableUnit + From<usize>,
     H: HasHeader<U>,
+    U: ReadableUnit + From<usize> + Copy,
 {
     fn from_header(&self) -> U {
         let base = self.basis.base().read_raw_unit();
@@ -517,39 +545,42 @@ where
 
 impl<U, B> Offset<U, B>
 where
-    B: HasBase<U> + HasAbsolute,
+    B: HasBase<U> + HasAbsolute + Copy,
+    U: Copy,
 {
-    pub fn with_header(&self, header_size: U) -> Offset<U, FromHeader<U, B>> {
-        Offset {
-            basis: FromHeader {
-                base: self.basis,
-                header_size,
-            },
-            absolute_offset: self.absolute_offset(),
-        }
-    }
+    // pub fn with_header(&self, header_size: U) -> Offset<U, FromHeader<U, B>> {
+    //     Offset {
+    //         basis: FromHeader {
+    //             base: self.basis,
+    //             header_size,
+    //         },
+    //         absolute_offset: self.absolute_offset(),
+    //     }
+    // }
 }
 
 impl<U, B> Offset<U, B>
 where
-    U: ReadableUnit + From<usize>,
+    B: Copy,
+    U: ReadableUnit + From<usize> + Copy,
 {
-    pub fn relative(&self, offset: U) -> Offset<U, B> {
-        let absolute_offset =
-            (self.absolute_offset.read_raw_unit() + offset.read_raw_unit()).into();
-        Offset {
-            basis: self.basis,
-            absolute_offset,
-        }
-    }
+    // pub fn relative(&self, offset: U) -> Offset<U, B> {
+    //     let absolute_offset =
+    //         (self.absolute_offset.read_raw_unit() + offset.read_raw_unit()).into();
+    //     Offset {
+    //         basis: self.basis,
+    //         absolute_offset,
+    //     }
+    // }
 }
 
 impl<U, B> FromHeader<U, B>
 where
-    B: HasBase<U>,
+    B: HasBase<U> + Copy,
+    U: Copy,
 {
     pub fn with_absolute(&self, absolute_offset: U) -> Offset<U, Self> {
-        let basis = *self.clone();
+        let basis = self.clone();
         Offset {
             basis,
             absolute_offset,
@@ -559,15 +590,15 @@ where
 
 impl<U, B> FromHeader<U, B>
 where
-    B: HasBase<U>,
-    U: ReadableUnit + From<usize>,
+    B: HasBase<U> + Copy,
+    U: ReadableUnit + From<usize> + Copy,
 {
     pub fn relative(&self, relative_offset: U) -> Offset<U, Self> {
         let relative_offset = relative_offset.read_raw_unit();
         let base = self.base().read_raw_unit();
         let header_size = self.header_size().read_raw_unit();
         let absolute_offset = (relative_offset + header_size + base).into();
-        let basis = *self.clone();
+        let basis = self.clone();
         Offset {
             basis,
             absolute_offset,
@@ -577,12 +608,12 @@ where
 
 /* types */
 
-pub type AbsoluteOffsetBytes = Offset<Bytes, Absolute>;
-pub type BaseOffsetBytes = Offset<Bytes, FromBase<Bytes>>;
+// pub type AbsoluteOffsetBytes = Offset<Bytes, Absolute>;
+// pub type BaseOffsetBytes = Offset<Bytes, FromBase<Bytes>>;
 pub type BodyOffsetBytes = Offset<Bytes, FromHeader<Bytes, FromBase<Bytes>>>;
 pub type ChunkAlignedElements = Offset<Aligned<Elements, ToChunk<Elements>>, Absolute>;
 
 pub type ChunkOffset = Offset<Chunks, Absolute>;
-pub type ElementOffset = Offset<Elements, Absolute>;
+// pub type ElementOffset = Offset<Elements, Absolute>;
 
-pub type BaseAddress = FromBase<Bytes>;
+// pub type BaseAddress = FromBase<Bytes>;

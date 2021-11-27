@@ -57,7 +57,6 @@ impl UfoFileWriteback {
         cfg: &UfoObjectConfig,
         core: &Arc<UfoCore>,
     ) -> Result<UfoFileWriteback, Error> {
-        let page_size = crate::get_page_size();
         let chunk_ct: Total<Chunks> = cfg
             .elements_loaded_at_once
             .align_up(cfg.element_ct().total())
@@ -151,7 +150,7 @@ impl UfoFileWriteback {
     }
 
     pub fn used_bytes(&self) -> PageAlignedBytes {
-        let chunk_ct = self.chunk_ct;
+        let chunk_ct = &self.chunk_ct;
         let last_chunk = chunk_ct.total().chunks - 1;
 
         let bitmap_ptr = self.mmap.as_ptr();
@@ -175,8 +174,8 @@ impl UfoFileWriteback {
         sum
     }
 
-    fn body_bytes(&self) -> Total<Bytes> {
-        self.body_bytes
+    fn body_bytes(&self) -> &Total<Bytes> {
+        &self.body_bytes
     }
 
     pub(super) fn writeback(&self, offset: &UfoOffset, data: &[u8]) -> Result<UfoWritebackAction> {

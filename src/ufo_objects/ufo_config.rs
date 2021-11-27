@@ -45,8 +45,8 @@ impl UfoObjectConfig {
     pub fn elements_loaded_at_once(&self) -> ToChunk<Elements> {
         self.elements_loaded_at_once
     }
-    pub fn element_ct(&self) -> Total<Elements> {
-        self.element_ct
+    pub fn element_ct(&self) -> &Total<Elements> {
+        &self.element_ct
     }
 
     pub fn read_only(&self) -> bool {
@@ -54,9 +54,7 @@ impl UfoObjectConfig {
     }
     pub fn body_size(&self) -> Total<Bytes> {
         let bytes = self.element_ct.total().elements * self.stride.alignment_quantum().bytes;
-        Total {
-            total: bytes.into(),
-        }
+        Bytes::from(bytes).as_total()
     }
 
     pub fn aligned_body_size(&self) -> PageAlignedBytes {
@@ -92,9 +90,7 @@ impl UfoObjectConfig {
             true_size_with_padding,
 
             elements_loaded_at_once: elements_loaded_at_once.into(),
-            element_ct: Total {
-                total: params.element_ct.into(),
-            },
+            element_ct: Elements::from(params.element_ct).as_total(),
 
             populate: params.populate,
             writeback_listener: params.writeback_listener,
