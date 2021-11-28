@@ -2,10 +2,10 @@ use std::result::Result;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{collections::HashMap, sync::MutexGuard};
 
+use crossbeam::channel::Sender;
 use log::trace;
 
 use btree_interval_map::IntervalMap;
-use crossbeam::channel::Sender;
 use crossbeam::sync::WaitGroup;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use semver::Version;
@@ -90,7 +90,7 @@ impl UfoCore {
         let msg_thread_event_sender = ufo_event_sender.clone();
 
         let rayon_pool = ThreadPoolBuilder::new()
-            .thread_name(|x| format!("UFO Core hasher {}", x))
+            .thread_name(|x| format!("UFO hasher No. {}", x))
             .build()
             .unwrap();
 
@@ -106,7 +106,7 @@ impl UfoCore {
 
         trace!(target: "ufo_core", "starting threads");
         let pop_core = core.clone();
-        let pop_workers = PopulateWorkers::new("Ufo Core", move |request_worker| {
+        let pop_workers = PopulateWorkers::new("Ufo pop worker", move |request_worker| {
             UfoCore::populate_loop(pop_core.clone(), request_worker)
         });
         pop_workers.request_worker();
@@ -114,7 +114,7 @@ impl UfoCore {
 
         let msg_core = core.clone();
         std::thread::Builder::new()
-            .name("Ufo Msg".to_string())
+            .name("Ufo Msg_Loop".to_string())
             .spawn(move || {
                 UfoCore::msg_loop(msg_core, msg_thread_event_sender, pop_workers, recv)
             })?;
@@ -174,6 +174,7 @@ impl UfoCore {
         self.msg_send
             .send(UfoInstanceMsg::Shutdown(sync.clone()))
             .expect("Can't send shutdown signal");
+        
         trace!(target: "ufo_core", "awaiting shutdown sync");
         sync.wait();
         trace!(target: "ufo_core", "sync, closing uffd filehandle");

@@ -154,7 +154,7 @@ where
     Recv: 'static + Send + Fn() -> UfoEventResult,
 {
     std::thread::Builder::new()
-        .name("Message Queue Runner".to_string())
+        .name("UFO User Events Runner".to_string())
         .spawn(move || {
             let mut callback = None;
             loop {
