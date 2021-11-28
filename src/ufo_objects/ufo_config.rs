@@ -1,5 +1,17 @@
 use crate::{sizes::*, UfoPopulateFn, UfoWritebackListenerFn};
 
+#[repr(C)]
+pub enum UfoEvictionPolicy {
+    /// Never writeback, don't even take hashes
+    /// This also marks the memory as write-protected and will result in a crash if the memory is written to
+    ReadOnly,
+    /// Hash the contents of memory on the way in and use the hash to test for changes on the way out
+    /// if changes are detected then they are written to the disk-cache and reloaded from there later
+    HashedWritebacks,
+    /// Don't hash, assume the memory changed and write it back to disk
+    AlwaysWriteback,
+}
+
 pub struct UfoObjectParams {
     pub header_size: usize,
     pub stride: usize,

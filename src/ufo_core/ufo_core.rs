@@ -10,7 +10,7 @@ use crossbeam::sync::WaitGroup;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use semver::Version;
 use uname::uname;
-use userfaultfd::Uffd;
+use userfaultfd::{FeatureFlags, IoctlFlags, Uffd};
 
 use crate::populate_workers::{PopulateWorkers, RequestWorker};
 use crate::{UfoEventConsumer, UfoEventSender};
@@ -70,6 +70,8 @@ impl UfoCore {
         let uffd = userfaultfd::UffdBuilder::new()
             .close_on_exec(true)
             .non_blocking(false)
+            .require_ioctls(IoctlFlags::WRITE_PROTECT)
+            .require_features(FeatureFlags::PAGEFAULT_FLAG_WP)
             .create()
             .unwrap();
 
@@ -174,7 +176,7 @@ impl UfoCore {
         self.msg_send
             .send(UfoInstanceMsg::Shutdown(sync.clone()))
             .expect("Can't send shutdown signal");
-        
+
         trace!(target: "ufo_core", "awaiting shutdown sync");
         sync.wait();
         trace!(target: "ufo_core", "sync, closing uffd filehandle");

@@ -1,6 +1,4 @@
-use std::sync::{
-    Arc,
-};
+use std::sync::Arc;
 
 use super::errors::*;
 use super::mmap_wrapers::*;

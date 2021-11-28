@@ -83,29 +83,33 @@ impl Bitlock {
         } else {
             let mapped = idx.chunks.wrapping_mul(self.coprime_multiplier) % self.size_bits;
 
-            let byte_idx =  mapped >> 3;
+            let byte_idx = mapped >> 3;
             assert!(byte_idx < self.size_bits);
 
             let bit = 1 << (mapped & 0b111);
             assert!(1 == u8::count_ones(bit));
 
-            Ok(MappedIdx {
-                byte_idx,
-                bit,
-            })
+            Ok(MappedIdx { byte_idx, bit })
         }
     }
 
     fn unlock(&self, guard: &BitGuard) {
-        let mapped_idx = self.map_index(guard.idx_chunks).expect("locked an invlid bit?");
+        let mapped_idx = self
+            .map_index(guard.idx_chunks)
+            .expect("locked an invlid bit?");
         let target = self.atomic_byte(&mapped_idx);
 
         let inv_bit = !mapped_idx.bit;
         debug_assert_eq!(inv_bit | mapped_idx.bit, 0xff);
         let prev = target.fetch_and(inv_bit, Ordering::Release);
-        debug_assert!(prev & mapped_idx.bit != 0, 
+        debug_assert!(
+            prev & mapped_idx.bit != 0,
             "{} wasn't locked {:08b} & {:08b} → {:08b}\nThis should be impossible",
-            guard.idx_chunks.chunks, prev, mapped_idx.bit, prev & mapped_idx.bit);
+            guard.idx_chunks.chunks,
+            prev,
+            mapped_idx.bit,
+            prev & mapped_idx.bit
+        );
     }
 
     fn try_lock(target: &mut AtomicU8, idx: &MappedIdx) -> bool {
@@ -123,7 +127,10 @@ impl Bitlock {
         }
 
         if Self::try_lock(target, &mapped_idx) {
-            Ok(BitGuard { idx_chunks, parent: self})
+            Ok(BitGuard {
+                idx_chunks,
+                parent: self,
+            })
         } else {
             Err(BitlockErr::Contended(idx))
         }
@@ -144,7 +151,10 @@ impl Bitlock {
             }
 
             if Self::try_lock(target, &mapped_idx) {
-                return Ok(BitGuard { idx_chunks, parent: self });
+                return Ok(BitGuard {
+                    idx_chunks,
+                    parent: self,
+                });
             }
 
             loop {

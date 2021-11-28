@@ -26,7 +26,7 @@ pub(crate) struct UfoChunk {
     object: Weak<RwLock<UfoObject>>,
     offset: UfoOffset,
     length: Option<Bytes>,
-    hash: Arc<OnceAwait<Option<DataHash>>>,
+    // hash: Arc<OnceAwait<Option<DataHash>>>,
 }
 
 impl UfoChunk {
@@ -50,7 +50,7 @@ impl UfoChunk {
             object: Arc::downgrade(arc),
             offset,
             length: Some(length),
-            hash: Arc::new(OnceAwait::new()),
+            // hash: Arc::new(OnceAwait::new()),
         }
     }
 
@@ -58,8 +58,36 @@ impl UfoChunk {
         &self.offset
     }
 
-    pub fn hash_fulfiller(&self) -> impl OnceFulfiller<Option<DataHash>> {
-        self.hash.clone()
+    // pub fn hash_fulfiller(&self) -> impl OnceFulfiller<Option<DataHash>> {
+    //     self.hash.clone()
+    // }
+
+    fn free_fast(
+        &self,
+        event_queue: &UfoEventSender,
+        dispositon: UfoUnloadDisposition,
+        obj: &UfoObject,
+        length_page_multiple: &PageAlignedBytes,
+    ) -> Result<PageAlignedBytes> {
+        // Not doing a writeback, punch it out and leave
+        unsafe {
+            let offset_bytes = self.offset.offset().from_base().bytes;
+            let data_ptr = obj.mmap.as_ptr().add(offset_bytes);
+            check_return_zero(libc::madvise(
+                data_ptr.cast(),
+                length_page_multiple.aligned().bytes,
+                libc::MADV_DONTNEED,
+            ))?;
+        }
+        event_queue
+            .send_event(UfoEvent::UnloadChunk {
+                ufo_id: self.ufo_id.0,
+                disposition: dispositon,
+                memory_freed: length_page_multiple.aligned().bytes,
+            })
+            .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
+
+        Ok(*length_page_multiple)
     }
 
     pub fn free_and_writeback_dirty(
@@ -81,112 +109,59 @@ impl UfoChunk {
 
                 if !obj.config.should_try_writeback() {
                     trace!(target: "ufo_object", "no writeback {:?}", self.ufo_id);
-                    // Not doing writebacks, punch it out and leave
-                    unsafe {
-                        let offset_bytes = self.offset.offset().from_base().bytes;
-                        let data_ptr = obj.mmap.as_ptr().add(offset_bytes);
-                        check_return_zero(libc::madvise(
-                            data_ptr.cast(),
-                            length_page_multiple.aligned().bytes,
-                            libc::MADV_DONTNEED,
-                        ))?;
-                    }
-                    event_queue
-                        .send_event(UfoEvent::UnloadChunk {
-                            ufo_id: self.ufo_id.0,
-                            disposition: UfoUnloadDisposition::ReadOnly,
-                            memory_freed: length_page_multiple.aligned().bytes,
-                        })
-                        .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
-                    return Ok(length_page_multiple);
+                    // calls the event handler for us
+                    return self.free_fast(
+                        event_queue,
+                        UfoUnloadDisposition::ReadOnly,
+                        &obj,
+                        &length_page_multiple,
+                    );
                 }
 
-                // must get the hash before we try to lock the chunk
-                // this guarantees that the lock on the chunk from populate will be clear
-                debug!(target: "ufo_object", "{:?}@{} retrieve hash", self.ufo_id, self.offset());
-                let stored_hash = self.hash.get();
-                trace!(target: "ufo_object", "{:?}@{} hash retrieved", self.ufo_id, self.offset());
-
-                // We first remap the pages from the UFO into the file backing
-                // we check the value of the page after the remap because the remap
-                //  is atomic and will let us read cleanly in the face of racing writers
                 let chunk_number = self.offset.chunk().absolute_offset();
-
                 assert_eq!(
-                    chunk_number, 
-                    obj.config.chunk_size().align_down(&self.offset().offset().from_header()).as_chunks()
+                    chunk_number,
+                    obj.config
+                        .chunk_size()
+                        .align_down(&self.offset().offset().from_header())
+                        .as_chunks()
                 );
 
-                debug!("try to uncontended-lock {:?}@{}", obj.id, self.offset());
                 let chunk_lock = obj
                     .writeback_util
                     .chunk_locks
-                    .lock_uncontended(chunk_number)
+                    .spinlock(chunk_number)
                     .unwrap();
-                    trace!("locked {:?}@{}", obj.id, self.offset());
-                unsafe {
-                    anyhow::ensure!(length_page_multiple.aligned().bytes <= pivot.length(), "Pivot too small");
-                    let data_ptr = obj
-                        .mmap
-                        .as_ptr()
-                        .add(self.offset.offset().from_base().bytes);
-                    let pivot_ptr = pivot.as_ptr();
-                    check_ptr_nonneg(libc::mremap(
-                        data_ptr.cast(),
-                        length_page_multiple.aligned().bytes,
-                        length_page_multiple.aligned().bytes,
-                        libc::MREMAP_FIXED | libc::MREMAP_MAYMOVE | libc::MREMAP_DONTUNMAP,
-                        pivot_ptr.cast::<*mut c_void>(),
-                    ))?;
-                    trace!(target: "ufo_object", "{:?}@{} mremaped data to pivot", self.ufo_id, self.offset());
+
+                let is_dirty = obj.writeback_util.dirty_flags.test(chunk_number.chunks);
+                if !is_dirty {
+                    trace!(target: "ufo_object", "clean chunk {:?}", self.ufo_id);
+                    // calls the event handler for us
+                    return self.free_fast(
+                        event_queue,
+                        UfoUnloadDisposition::Clean,
+                        &obj,
+                        &length_page_multiple,
+                    );
                 }
 
-                let mut was_on_disk = false;
-                let mut written_to_disk = false;
+                // Dirty, need to write back
 
-                if let Some(hash) = stored_hash {
-                    let calculated_hash = pivot.with_slice(0, length_bytes, hash_function);
-                    trace!(target: "ufo_object", "{:?}@{} writeback hash matches {}", 
-                        self.ufo_id, self.offset(), hash == &calculated_hash);
-                    if hash != &calculated_hash {
-                        let (_, rb): ((), Result<()>) = rayon::join(
-                            || {
-                                let start =
-                                    self.offset.as_index_floor().absolute_offset().aligned();
-                                let loaded_at_once =
-                                    obj.config.elements_loaded_at_once().alignment_quantum();
-                                let end = obj
-                                    .config
-                                    .element_ct()
-                                    .bound(loaded_at_once.add(&start))
-                                    .bounded();
-                                let ptr = pivot.as_ptr();
-                                if let Some(listener) = &obj.config.writeback_listener {
-                                    listener(UfoWriteListenerEvent::Writeback {
-                                        start_idx: start.elements,
-                                        end_idx: end.elements,
-                                        data: ptr,
-                                    });
-                                }
-                            },
-                            || {
-                                let writeback_action_taken =
-                                    pivot.with_slice(0, length_bytes, |data| {
-                                        obj.writeback_util.writeback(&self.offset, data)
-                                    })?;
-                                was_on_disk = writeback_action_taken.was_on_disk();
-                                written_to_disk = true;
-                                Ok(())
-                            },
-                        );
-                        rb?;
-                    }
-                }
+                // performs the writeback with an mremap, which is an atomic move
+                // even in the face of racing writers this will read SOMETHING cleanly
+                // a writer that sees this chunk disappear will simply trigger another fault
+                // and round and round we go
+                // we hold the chunk lock while this is happening so we won't be interrupted by a racing popualte or write fault
+                let action = obj.writeback_util.mremap_writeback(
+                    &chunk_lock,
+                    &length_page_multiple,
+                    &self.offset,
+                    &obj,
+                )?;
 
-                let unload_disposition = match (was_on_disk, written_to_disk) {
-                    (false, true) => UfoUnloadDisposition::NewlyDirty,
-                    (true, true) => UfoUnloadDisposition::ExistingDirty,
-                    (_, false) => UfoUnloadDisposition::Clean,
+                let unload_disposition = match action {
+                    UfoWritebackAction::NewWriteback => UfoUnloadDisposition::NewlyDirty,
+                    UfoWritebackAction::UpdateWriteback => UfoUnloadDisposition::ExistingDirty,
                 };
 
                 event_queue
@@ -197,7 +172,6 @@ impl UfoChunk {
                     })
                     .map_err(|_| Error::new(std::io::ErrorKind::Other, "event_queue broken"))?;
 
-                self.length = None;
                 trace!("unlock free {:?}@{}", obj.id, self.offset());
                 chunk_lock.droplockster();
                 // return page multiple of bytes since memory is consumed by the page
@@ -233,34 +207,37 @@ impl UfoChunk {
             UfoInternalErr::UfoStateError("cannot has_listener without a listener!".to_string())
         })?;
 
-        let known_hash = self
-            .hash
-            .get()
-            .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
+        let chunk_number = self.offset.chunk().absolute_offset();
+        assert_eq!(
+            chunk_number,
+            ufo.config
+                .chunk_size()
+                .align_down(&self.offset().offset().from_header())
+                .as_chunks()
+        );
 
-        let chunk_slice = unsafe {
-            let chunk_ptr: *const u8 = ufo
-                .mmap
-                .as_ptr()
-                .add(self.offset.offset().from_base().bytes);
-            let chunk_length = length.bytes;
-            slice::from_raw_parts(chunk_ptr, chunk_length)
-        };
-
-        println!("hashing {}", self.offset().chunk().absolute_offset().chunks);
-        let calculated_hash = hash_function(chunk_slice);
-        println!("hashed {}", self.offset().chunk().absolute_offset().chunks);
-
-        if known_hash != calculated_hash {
-            let start = self.offset.as_index_floor().absolute_offset().aligned();
-            let elements = (length.bytes / ufo.config.stride().alignment_quantum().bytes).into();
-            let end = ufo.config.element_ct.bound(start.add(&elements)).bounded();
-            (writeback_listener)(UfoWriteListenerEvent::Writeback {
-                start_idx: start.elements,
-                end_idx: end.elements,
-                data: chunk_slice.as_ptr(),
-            });
+        let chunk_lock = ufo
+            .writeback_util
+            .chunk_locks
+            .spinlock(chunk_number)
+            .unwrap();
+        
+        if !ufo.writeback_util.dirty_flags.test(chunk_number.chunks) {
+            // not dirty
+            return Ok(());
         }
+
+        let chunk_ptr = self.offset().offset().absolute_offset().bytes as *const u8;
+
+        let start = self.offset.as_index_floor().absolute_offset().aligned();
+        let elements = (length.bytes / ufo.config.stride().alignment_quantum().bytes).into();
+        let end = ufo.config.element_ct.bound(start.add(&elements)).bounded();
+        
+        (writeback_listener)(UfoWriteListenerEvent::Writeback {
+            start_idx: start.elements,
+            end_idx: end.elements,
+            data: chunk_ptr,
+        });
 
         self.length = None;
         Ok(())

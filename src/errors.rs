@@ -97,3 +97,9 @@ impl From<BitlockErr> for UfoPopulateError {
         UfoPopulateError
     }
 }
+
+impl From<userfaultfd::Error> for UfoPopulateError {
+    fn from(e: userfaultfd::Error) -> Self {
+        UfoPopulateError
+    }
+}

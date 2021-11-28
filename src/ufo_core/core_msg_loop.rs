@@ -3,6 +3,8 @@ use std::{ops::Range, vec::Vec};
 
 use crossbeam::channel::Receiver;
 use log::{debug, info, trace};
+use nix::sys::mman::{mprotect, ProtFlags};
+use userfaultfd::RegisterMode;
 
 use crate::events::UfoEvent;
 use crate::experimental_compat::Droplockster;
@@ -59,11 +61,20 @@ fn allocate_impl(
 
     let mmap = BaseMmap::new(
         config.true_size_with_padding.total().aligned().bytes,
-        &[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
+        //&[MemoryProtectionFlag::Read, MemoryProtectionFlag::Write],
+        &[MemoryProtectionFlag::Read],
         &[MmapFlag::Anonymous, MmapFlag::Private, MmapFlag::NoReserve],
         None,
     )
     .expect("Mmap Error");
+
+    unsafe {
+        mprotect(
+            mmap.as_ptr().cast(),
+            config.header_size_with_padding.aligned().bytes,
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+        )
+    }?;
 
     let mmap_ptr = mmap.as_ptr();
     let true_size = &config.true_size_with_padding;
@@ -77,8 +88,11 @@ fn allocate_impl(
         mmap_base, mmap_base + true_size.total().aligned().bytes);
 
     let writeback = UfoFileWriteback::new(id, &config, this)?;
-    this.uffd
-        .register(mmap_ptr.cast(), true_size.total().aligned().bytes)?;
+    this.uffd.register_with_mode(
+        mmap_ptr.cast(),
+        true_size.total().aligned().bytes,
+        RegisterMode::MISSING | RegisterMode::WRITE_PROTECT,
+    )?;
 
     //Pre-zero the header, that isn't part of our populate duties
     if config.header_size_with_padding.aligned().bytes > 0 {
@@ -144,19 +158,15 @@ fn reset_impl(
     // we cannot lock the UFO for write while the core state is held, this can rarely cause a deadlock
     state.droplockster();
 
-    let mut ufo = ufo
-        .write()
-        .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+    let mut ufo = ufo.write().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
 
-        
-        debug!(target: "ufo_core", "resetting {:?}", ufo.id);
-        
+    debug!(target: "ufo_core", "resetting {:?}", ufo.id);
+
     let disk_freed = ufo.reset_internal()?;
 
     let mut state = this.get_locked_state()?;
     let (memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
     state.droplockster();
-
 
     event_sender.send_event(UfoEvent::UfoReset {
         ufo_id: ufo_id.0,
@@ -296,7 +306,9 @@ impl UfoCore {
                 Ok(m) => match m {
                     UfoInstanceMsg::Allocate(fulfiller, cfg) => {
                         fulfiller
-                            .fulfill(allocate_impl(&this, &event_sender, cfg).expect("Allocate Error"))
+                            .fulfill(
+                                allocate_impl(&this, &event_sender, cfg).expect("Allocate Error"),
+                            )
                             .unwrap_or(());
                     }
                     UfoInstanceMsg::Reset(_, ufo_id) => {

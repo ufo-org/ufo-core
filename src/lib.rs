@@ -7,8 +7,8 @@
 //     int_roundings
 // )]
 
-mod bitwise_spinlock;
 mod bitset;
+mod bitwise_spinlock;
 mod errors;
 mod events;
 mod experimental_compat;

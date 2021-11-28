@@ -13,8 +13,8 @@ parallel_hashing = []
 
 [dependencies]
 # userfaultfd = "0.2.0" # requires libclang1 installed
-userfaultfd = "0.3.2"
-# userfaultfd = { path = "/home/ckerr/workspace/userfaultfd-rs/" }
+# userfaultfd = "0.3.2"
+userfaultfd = { path = "/home/ckerr/workspace/userfaultfd-rs/", features = ["linux5_7"] }
 anyhow = "1.0.38"
 blake3 = { version = "^1.2", features = ["rayon"] }
 btree_interval_map = { git = "https://github.com/electroCutie/btree_interval_map", branch = "main" }
@@ -23,7 +23,7 @@ itertools = "0.10.1"
 #libc = "^0.2"
 libc = { git = "https://github.com/rust-lang/libc.git", branch = "master" }
 log = "0.4.14"
-nix = "0.17"
+nix = "0.23"
 num = "^0.3" # for One
 promissory = "0.1"
 rayon = "^1.5"

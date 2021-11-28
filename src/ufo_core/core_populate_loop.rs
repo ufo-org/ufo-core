@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::{cmp::min, ffi::c_void, ops::Deref};
 
 use log::{debug, info, trace, warn};
+use nix::sys::mman::{ProtFlags, mprotect};
+use userfaultfd::{FaultKind, ReadWrite};
 
 use crate::events::UfoEvent;
 use crate::experimental_compat::Droplockster;
@@ -15,9 +17,55 @@ use crate::write_buffer::*;
 
 use super::*;
 
+fn unprotect_impl(
+    core: &UfoCore,
+    addr: *mut c_void,
+) -> Result<(), UfoPopulateError> {
+    let state = core.get_locked_state().unwrap();
+
+    let ptr_int = Bytes::from(addr as usize);
+
+    debug!(target: "ufo_core", "write fault at {:x}", addr as usize);
+
+    // blindly unwrap here because if we get a message for an address we don't have then it is explodey time
+    // clone the arc so we aren't borrowing the state
+    let ufo_arc = state
+        .objects_by_segment
+        .get(&ptr_int.bytes)
+        .unwrap()
+        .clone();
+    trace!(target: "ufo_core", "locking ufo for {:x}", addr as usize);
+    let ufo = ufo_arc.read().unwrap();
+    debug!(target: "ufo_core", "locked ufo for {:x}: {:?}", addr as usize, ufo.id);
+
+    let aligned_addr = ufo.config.chunk_size().align_down(&Bytes::from(addr as usize));
+    let offset = ufo.offset_basis()
+        .with_absolute(aligned_addr.aligned());
+    let chunk_number = ufo.config.chunk_size().align_down(&offset.from_header()).as_chunks();
+
+    let end = offset.add(&ufo.config.chunk_size().alignment_quantum());
+    let end = ufo.config.body_size().bound(end.from_header());
+    let end = ToPage.align_up(&end.bounded());
+
+    let length = end.aligned().sub(&offset.from_header());
+
+    debug!(target: "ufo_core", "locking to unprotect page {:?}@{}", ufo.id, chunk_number.chunks);
+    let chunk_lock = ufo.writeback_util.chunk_locks
+        .spinlock(chunk_number)?;
+
+    trace!(target: "ufo_core", "Marking dirty and unprotecting page {:?}@{}", ufo.id, chunk_number.chunks);
+    ufo.writeback_util.dirty_flags.set(chunk_number.chunks);
+    core.uffd.remove_write_protection(offset.absolute_offset().bytes as *mut c_void, length.bytes, true)?;
+
+    chunk_lock.droplockster();
+    
+    Ok(())
+}
+
 fn populate_impl(
     core: &UfoCore,
     buffer: &mut UfoWriteBuffer,
+    rw: ReadWrite,
     addr: *mut c_void,
 ) -> Result<(), UfoPopulateError> {
     let event_queue = { core.ufo_event_sender.clone() };
@@ -29,7 +77,11 @@ fn populate_impl(
 
     // blindly unwrap here because if we get a message for an address we don't have then it is explodey time
     // clone the arc so we aren't borrowing the state
-    let ufo_arc = state.objects_by_segment.get(&ptr_int.bytes).unwrap().clone();
+    let ufo_arc = state
+        .objects_by_segment
+        .get(&ptr_int.bytes)
+        .unwrap()
+        .clone();
     let ufo = ufo_arc.read().unwrap();
 
     let ufo_offset = UfoOffset::from_addr(ufo.deref(), addr);
@@ -47,7 +99,10 @@ fn populate_impl(
 
     let offset_basis = ufo.offset_basis();
     let raw_offset = offset_basis.with_absolute(ptr_int);
-    let aligned_offset = ufo.config.chunk_size().align_down(&raw_offset.from_header());
+    let aligned_offset = ufo
+        .config
+        .chunk_size()
+        .align_down(&raw_offset.from_header());
     assert!(aligned_offset.aligned().bytes <= raw_offset.from_header().bytes);
     assert!(aligned_offset.aligned().bytes < ufo.config.body_size().total().bytes);
     let populate_offset = offset_basis.relative(aligned_offset.aligned());
@@ -137,11 +192,28 @@ fn populate_impl(
     assert!(raw_data.len() >= populate_size_padded.aligned().bytes);
     trace!(target: "ufo_core", "data ready");
 
+    let target_ptr = chunk.offset().offset().absolute_offset().bytes as *mut c_void;
+    // if we get in a read fault then we optimistically mark the chunk as read-only
+    // if it is a write then we know it will be dirtied instantly and just mark it as writeable right away
+    // we set the flags in the writeback utility to match the incoming event
+    // if it is a write then mark it down, clearing it on a read
+    match &rw {
+        ReadWrite::Read => {
+            core.uffd.write_protect(target_ptr, populate_size_padded.aligned().bytes)?;
+            ufo.writeback_util.dirty_flags.clear(chunk_number.chunks);
+        },
+        ReadWrite::Write => {
+            //TODO: makle sure that wake false is approporiate here, seems to be since we need to populate still
+            core.uffd.remove_write_protection(target_ptr, populate_size_padded.aligned().bytes, false)?;
+            ufo.writeback_util.dirty_flags.set(chunk_number.chunks);
+        },
+    };
+
     unsafe {
         core.uffd
             .copy(
                 raw_data.as_ptr().cast(),
-                chunk.offset().offset().absolute_offset().bytes as *mut c_void,
+                target_ptr as *mut c_void,
                 populate_size_padded.aligned().bytes,
                 true,
             )
@@ -155,36 +227,11 @@ fn populate_impl(
         loaded_from_writeback: from_writeback,
     })?;
 
-    let hash_fulfiller = chunk.hash_fulfiller();
+    chunk_lock.droplockster();
 
     let mut state = core.get_locked_state().unwrap();
-    let unlock_str = format!("unlocked {:?}@{}", ufo.id, chunk.offset());
     state.loaded_chunks.add(chunk);
     trace!(target: "ufo_core", "chunk saved");
-
-    // release the lock before calculating the hash so other workers can proceed
-    state.droplockster();
-
-    if config.should_try_writeback() {
-        // Make sure to take a slice of the raw data. the kernel operates in page sized chunks but the UFO ends where it ends
-        let mut calculated_hash = None;
-        core.rayon_pool.in_place_scope(|s| {
-            // do this work in a dedicated thread pool so things waiting can't block the work
-            s.spawn(|_| {
-                trace!(target: "ufo_core", "calculating hash");
-                calculated_hash = Some(hash_function(&raw_data[0..populate_size.bytes]));
-                trace!(target: "ufo_core", "calculated hash");
-            });
-        });
-        assert!(calculated_hash.is_some());
-        chunk_lock.droplockster(); // must drop this lock before the hash is released
-        trace!("{}", unlock_str);
-        hash_fulfiller.try_init(calculated_hash);
-    } else {
-        chunk_lock.droplockster(); // must drop this lock before the hash is released
-        trace!("{}", unlock_str);
-        hash_fulfiller.try_init(None);
-    }
 
     Ok(())
 }
@@ -197,7 +244,8 @@ impl UfoCore {
         to_load: Bytes,
     ) {
         assert!(to_load.bytes + config.low_watermark < config.high_watermark);
-        if to_load.bytes + state.loaded_chunks.used_memory().aligned().bytes > config.high_watermark {
+        if to_load.bytes + state.loaded_chunks.used_memory().aligned().bytes > config.high_watermark
+        {
             state
                 .loaded_chunks
                 .free_until_low_water_mark(event_queue)
@@ -217,10 +265,15 @@ impl UfoCore {
             }
             match uffd.read_event() {
                 Ok(Some(event)) => match event {
-                    userfaultfd::Event::Pagefault { rw: _, addr } => {
+                    userfaultfd::Event::Pagefault { rw, addr, kind: FaultKind::Missing } => {
                         request_worker.request_worker(); // while we work someone else waits
-                        populate_impl(&*this, &mut buffer, addr).expect("Error during populate");
-                    }
+                        populate_impl(&this, &mut buffer, rw, addr)
+                            .expect("Error during populate");
+                    },
+                    userfaultfd::Event::Pagefault { rw: _, addr, kind: FaultKind::WriteProtected } => {
+                        request_worker.request_worker(); // while we work someone else waits
+                        unprotect_impl(&this, addr).expect("Error during unprotect");
+                    },
                     e => panic!("Recieved an event we did not register for {:?}", e),
                 },
                 Ok(None) => {
@@ -228,7 +281,7 @@ impl UfoCore {
                     warn!(target: "ufo_core", "huh")
                 }
                 Err(userfaultfd::Error::SystemError(e))
-                    if e.as_errno() == Some(nix::errno::Errno::EBADF) =>
+                    if e == nix::errno::Errno::EBADF =>
                 {
                     info!(target: "ufo_core", "closing uffd loop on ebadf");
                     return /*done*/;

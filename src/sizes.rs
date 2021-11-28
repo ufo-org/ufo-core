@@ -147,10 +147,10 @@ where
 pub struct ToPage;
 
 impl ToPage {
-    pub fn zero() -> PageAlignedBytes{
-        Aligned{
+    pub fn zero() -> PageAlignedBytes {
+        Aligned {
             alignment: ToPage,
-            unit: 0.into()
+            unit: 0.into(),
         }
     }
 }
@@ -382,6 +382,52 @@ where
     }
 }
 
+impl<U, B> Offset<U, B>
+where
+    B: Copy,
+    U: Copy + ReadableUnit + From<usize>,
+{
+    pub fn add(&self, relative: &U) -> Self {
+        let a = self.absolute_offset.read_raw_unit();
+        let b = relative.read_raw_unit();
+        let absolute_offset = a.checked_add(b);
+        if let Some(absolute_offset) = absolute_offset {
+            Offset {
+                basis: self.basis,
+                absolute_offset: U::from(absolute_offset),
+            }
+        } else {
+            panic!("{} + {} > MAX", a, b);
+        }
+    }
+
+    pub fn sub(&self, relative: &U) -> Self {
+        let a = self.absolute_offset.read_raw_unit();
+        let b = relative.read_raw_unit();
+        let absolute_offset = a.checked_sub(b);
+        if let Some(absolute_offset) = absolute_offset {
+            Offset {
+                basis: self.basis,
+                absolute_offset: U::from(absolute_offset),
+            }
+        } else {
+            panic!("{} < {}", a, b);
+        }
+    }
+}
+
+impl<U> Offset<U, Absolute>
+where
+    U: Copy + From<usize>,
+{
+    pub fn absolute_zero() -> Self {
+        Offset {
+            basis: Absolute,
+            absolute_offset: U::from(0),
+        }
+    }
+}
+
 /*
    Absolute (Offset from 0)
 */
@@ -505,16 +551,16 @@ impl<U> FromBase<U>
 where
     U: ReadableUnit + From<usize> + Copy,
 {
-    // pub fn relative(&self, relative_offset: U) -> Offset<U, Self> {
-    //     let relative_offset = relative_offset.read_raw_unit();
-    //     let base = self.base().read_raw_unit();
-    //     let absolute_offset = (relative_offset + base).into();
-    //     let basis = self.clone();
-    //     Offset {
-    //         basis,
-    //         absolute_offset,
-    //     }
-    // }
+    pub fn relative(&self, relative_offset: U) -> Offset<U, Self> {
+        let relative_offset = relative_offset.read_raw_unit();
+        let base = self.base().read_raw_unit();
+        let absolute_offset = (relative_offset + base).into();
+        let basis = self.clone();
+        Offset {
+            basis,
+            absolute_offset,
+        }
+    }
 }
 
 /*
