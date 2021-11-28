@@ -12,9 +12,8 @@ parallel_hashing = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# userfaultfd = "0.2.0" # requires libclang1 installed
-# userfaultfd = "0.3.2"
-userfaultfd = { path = "/home/ckerr/workspace/userfaultfd-rs/", features = ["linux5_7"] }
+userfaultfd = { version = "^0.4", features = ["linux5_7"] }
+#userfaultfd = { path = "/home/ckerr/workspace/userfaultfd-rs/", features = ["linux5_7"] }
 anyhow = "1.0.38"
 blake3 = { version = "^1.2", features = ["rayon"] }
 btree_interval_map = { git = "https://github.com/electroCutie/btree_interval_map", branch = "main" }
