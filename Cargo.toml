@@ -1,6 +1,6 @@
 [package]
 name = "ufo_core"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Colette 🌩︎‍💝 Kerr <Colette.m.y.Kerr@gmail.com>"]
 edition = "2018"
 
@@ -12,23 +12,22 @@ parallel_hashing = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# userfaultfd = "0.2.0" # requires libclang1 installed
-userfaultfd = "0.3.2"
+userfaultfd = "^0.4" # requires libclang
 # userfaultfd = { path = "/home/ckerr/workspace/userfaultfd-rs/" }
 anyhow = "1.0.38"
 blake3 = { version = "^1.2", features = ["rayon"] }
 btree_interval_map = { git = "https://github.com/electroCutie/btree_interval_map", branch = "main" }
-crossbeam = "0.8.0"
-itertools = "0.10.1"
+crossbeam = "^0.8"
+itertools = "^0.10"
 #libc = "^0.2"
 libc = { git = "https://github.com/rust-lang/libc.git", branch = "master" }
-log = "0.4.14"
-nix = "0.17"
+log = "^0.4"
+nix = "0.23"
 num = "^0.3" # for One
-promissory = "0.1"
+promissory = "^0.1"
 rayon = "^1.5"
-semver = "1.0.4"
-thiserror = "1.0"
+semver = "^1.0"
+thiserror = "^1.0"
 uname = "0.1.1"
 xorshift = "0.1.3"
 

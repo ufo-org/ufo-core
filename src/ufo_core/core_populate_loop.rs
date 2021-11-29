@@ -217,7 +217,7 @@ impl UfoCore {
             }
             match uffd.read_event() {
                 Ok(Some(event)) => match event {
-                    userfaultfd::Event::Pagefault { rw: _, addr } => {
+                    userfaultfd::Event::Pagefault { rw: _, addr, kind: _} => {
                         request_worker.request_worker(); // while we work someone else waits
                         populate_impl(&*this, &mut buffer, addr).expect("Error during populate");
                     }
@@ -228,7 +228,7 @@ impl UfoCore {
                     warn!(target: "ufo_core", "huh")
                 }
                 Err(userfaultfd::Error::SystemError(e))
-                    if e.as_errno() == Some(nix::errno::Errno::EBADF) =>
+                    if e == nix::errno::Errno::EBADF =>
                 {
                     info!(target: "ufo_core", "closing uffd loop on ebadf");
                     return /*done*/;
