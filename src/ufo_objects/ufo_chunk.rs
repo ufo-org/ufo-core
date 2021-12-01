@@ -113,8 +113,11 @@ impl UfoChunk {
                 let chunk_number = self.offset.chunk().absolute_offset();
 
                 assert_eq!(
-                    chunk_number, 
-                    obj.config.chunk_size().align_down(&self.offset().offset().from_header()).as_chunks()
+                    chunk_number,
+                    obj.config
+                        .chunk_size()
+                        .align_down(&self.offset().offset().from_header())
+                        .as_chunks()
                 );
 
                 debug!("try to uncontended-lock {:?}@{}", obj.id, self.offset());
@@ -123,9 +126,12 @@ impl UfoChunk {
                     .chunk_locks
                     .lock_uncontended(chunk_number)
                     .unwrap();
-                    trace!("locked {:?}@{}", obj.id, self.offset());
+                trace!("locked {:?}@{}", obj.id, self.offset());
                 unsafe {
-                    anyhow::ensure!(length_page_multiple.aligned().bytes <= pivot.length(), "Pivot too small");
+                    anyhow::ensure!(
+                        length_page_multiple.aligned().bytes <= pivot.length(),
+                        "Pivot too small"
+                    );
                     let data_ptr = obj
                         .mmap
                         .as_ptr()

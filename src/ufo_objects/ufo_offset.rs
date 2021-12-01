@@ -12,12 +12,21 @@ impl UfoOffset {
         let header_base = ufo.offset_basis();
 
         let raw_offset: BodyOffsetBytes = header_base.with_absolute((addr as usize).into());
-        let aligned_offset: ChunkAlignedBytes = ufo.config.chunk_size().align_down(&raw_offset.from_header());
+        let aligned_offset: ChunkAlignedBytes = ufo
+            .config
+            .chunk_size()
+            .align_down(&raw_offset.from_header());
         let aligned_offset = aligned_offset.aligned();
         let offset = header_base.relative(aligned_offset);
 
-        assert!(offset.absolute_offset().bytes % crate::get_page_size() == 0, "bad memory alignment");
-        assert!(offset.from_header().bytes % crate::get_page_size() == 0, "should be impossible, bad body alignment");
+        assert!(
+            offset.absolute_offset().bytes % crate::get_page_size() == 0,
+            "bad memory alignment"
+        );
+        assert!(
+            offset.from_header().bytes % crate::get_page_size() == 0,
+            "should be impossible, bad body alignment"
+        );
 
         assert!(
             offset.absolute_offset().bytes

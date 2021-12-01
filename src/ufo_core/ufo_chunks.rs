@@ -4,8 +4,8 @@ use itertools::Itertools;
 use log::debug;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
-use crate::{UfoEventSender, ufo_core::chunk_freer::ChunkFreer};
 use crate::sizes::*;
+use crate::{ufo_core::chunk_freer::ChunkFreer, UfoEventSender};
 
 use super::*;
 
@@ -33,7 +33,10 @@ impl UfoChunks {
         self.loaded_chunks.push_back(chunk);
     }
 
-    pub fn drop_ufo_chunks(&mut self, ufo: &UfoObject) -> Result<(PageAlignedBytes, Elements), UfoInternalErr> {
+    pub fn drop_ufo_chunks(
+        &mut self,
+        ufo: &UfoObject,
+    ) -> Result<(PageAlignedBytes, Elements), UfoInternalErr> {
         let before = self.used_memory;
         let chunks = &mut self.loaded_chunks;
 
@@ -43,9 +46,10 @@ impl UfoChunks {
             .map(|chunk| chunk.mark_freed_notify_listener(ufo))
             .map(|r| r.and(Ok(1)))
             .reduce(|| Ok(0), |a, b| Ok(a? + b?))?;
-        self.used_memory = chunks.iter()
+        self.used_memory = chunks
+            .iter()
             .map(UfoChunk::size_in_page_bytes)
-            .reduce(|a,b| a.add(&b))
+            .reduce(|a, b| a.add(&b))
             .unwrap_or_else(ToPage::zero);
 
         Ok((before.sub(&self.used_memory), Elements::from(ct)))

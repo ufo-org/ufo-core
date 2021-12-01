@@ -1,7 +1,11 @@
 use anyhow::Result;
 use log::trace;
 
-use crate::{UfoChunk, UfoEventSender, mmap_wrapers::{BaseMmap, MemoryProtectionFlag, Mmap, MmapFlag}, sizes::{PageAlignedBytes, ToPage}};
+use crate::{
+    mmap_wrapers::{BaseMmap, MemoryProtectionFlag, Mmap, MmapFlag},
+    sizes::{PageAlignedBytes, ToPage},
+    UfoChunk, UfoEventSender,
+};
 
 pub(crate) struct ChunkFreer {
     event_sender: UfoEventSender,

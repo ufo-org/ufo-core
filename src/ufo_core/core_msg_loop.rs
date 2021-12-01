@@ -144,19 +144,15 @@ fn reset_impl(
     // we cannot lock the UFO for write while the core state is held, this can rarely cause a deadlock
     state.droplockster();
 
-    let mut ufo = ufo
-        .write()
-        .map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+    let mut ufo = ufo.write().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
 
-        
-        debug!(target: "ufo_core", "resetting {:?}", ufo.id);
-        
+    debug!(target: "ufo_core", "resetting {:?}", ufo.id);
+
     let disk_freed = ufo.reset_internal()?;
 
     let mut state = this.get_locked_state()?;
     let (memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
     state.droplockster();
-
 
     event_sender.send_event(UfoEvent::UfoReset {
         ufo_id: ufo_id.0,
@@ -296,7 +292,9 @@ impl UfoCore {
                 Ok(m) => match m {
                     UfoInstanceMsg::Allocate(fulfiller, cfg) => {
                         fulfiller
-                            .fulfill(allocate_impl(&this, &event_sender, cfg).expect("Allocate Error"))
+                            .fulfill(
+                                allocate_impl(&this, &event_sender, cfg).expect("Allocate Error"),
+                            )
                             .unwrap_or(());
                     }
                     UfoInstanceMsg::Reset(_, ufo_id) => {

@@ -29,7 +29,11 @@ fn populate_impl(
 
     // blindly unwrap here because if we get a message for an address we don't have then it is explodey time
     // clone the arc so we aren't borrowing the state
-    let ufo_arc = state.objects_by_segment.get(&ptr_int.bytes).unwrap().clone();
+    let ufo_arc = state
+        .objects_by_segment
+        .get(&ptr_int.bytes)
+        .unwrap()
+        .clone();
     let ufo = ufo_arc.read().unwrap();
 
     let ufo_offset = UfoOffset::from_addr(ufo.deref(), addr);
@@ -47,7 +51,10 @@ fn populate_impl(
 
     let offset_basis = ufo.offset_basis();
     let raw_offset = offset_basis.with_absolute(ptr_int);
-    let aligned_offset = ufo.config.chunk_size().align_down(&raw_offset.from_header());
+    let aligned_offset = ufo
+        .config
+        .chunk_size()
+        .align_down(&raw_offset.from_header());
     assert!(aligned_offset.aligned().bytes <= raw_offset.from_header().bytes);
     assert!(aligned_offset.aligned().bytes < ufo.config.body_size().total().bytes);
     let populate_offset = offset_basis.relative(aligned_offset.aligned());
@@ -197,7 +204,8 @@ impl UfoCore {
         to_load: Bytes,
     ) {
         assert!(to_load.bytes + config.low_watermark < config.high_watermark);
-        if to_load.bytes + state.loaded_chunks.used_memory().aligned().bytes > config.high_watermark {
+        if to_load.bytes + state.loaded_chunks.used_memory().aligned().bytes > config.high_watermark
+        {
             state
                 .loaded_chunks
                 .free_until_low_water_mark(event_queue)
@@ -217,7 +225,11 @@ impl UfoCore {
             }
             match uffd.read_event() {
                 Ok(Some(event)) => match event {
-                    userfaultfd::Event::Pagefault { rw: _, addr, kind: _} => {
+                    userfaultfd::Event::Pagefault {
+                        rw: _,
+                        addr,
+                        kind: _,
+                    } => {
                         request_worker.request_worker(); // while we work someone else waits
                         populate_impl(&*this, &mut buffer, addr).expect("Error during populate");
                     }
@@ -227,9 +239,7 @@ impl UfoCore {
                     /*huh*/
                     warn!(target: "ufo_core", "huh")
                 }
-                Err(userfaultfd::Error::SystemError(e))
-                    if e == nix::errno::Errno::EBADF =>
-                {
+                Err(userfaultfd::Error::SystemError(e)) if e == nix::errno::Errno::EBADF => {
                     info!(target: "ufo_core", "closing uffd loop on ebadf");
                     return /*done*/;
                 }

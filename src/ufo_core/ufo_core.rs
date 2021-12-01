@@ -174,7 +174,7 @@ impl UfoCore {
         self.msg_send
             .send(UfoInstanceMsg::Shutdown(sync.clone()))
             .expect("Can't send shutdown signal");
-        
+
         trace!(target: "ufo_core", "awaiting shutdown sync");
         sync.wait();
         trace!(target: "ufo_core", "sync, closing uffd filehandle");

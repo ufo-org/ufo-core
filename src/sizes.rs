@@ -147,10 +147,10 @@ where
 pub struct ToPage;
 
 impl ToPage {
-    pub fn zero() -> PageAlignedBytes{
-        Aligned{
+    pub fn zero() -> PageAlignedBytes {
+        Aligned {
             alignment: ToPage,
-            unit: 0.into()
+            unit: 0.into(),
         }
     }
 }

@@ -1,15 +1,12 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
-
-
-
 pub(crate) struct AtomicBitset {
     base: usize,
     size_bits: usize,
 }
 
 impl AtomicBitset {
-    pub fn new(ptr: *mut u8, ct: usize) -> Self{
+    pub fn new(ptr: *mut u8, ct: usize) -> Self {
         AtomicBitset {
             base: ptr as usize,
             size_bits: ct,
@@ -21,7 +18,7 @@ impl AtomicBitset {
         unsafe { &mut *(ptr.add(byte) as *mut u8 as *mut AtomicU8) }
     }
 
-    fn byte_and_bit(&self, idx: usize) -> (usize, u8){
+    fn byte_and_bit(&self, idx: usize) -> (usize, u8) {
         assert!(idx < self.size_bits);
         (idx >> 3, 1 << (idx & 0b111))
     }
@@ -47,5 +44,4 @@ impl AtomicBitset {
         let atomic = self.atomic_byte(byte);
         atomic.load(Ordering::Relaxed) & bit != 0
     }
-
 }

@@ -73,8 +73,11 @@ impl UfoFileWriteback {
                 .bytes
         );
 
-        let trailing_elements = cfg.element_ct().total()
-            .sub(&elements_at_once.align_down(cfg.element_ct().total()).aligned());
+        let trailing_elements = cfg.element_ct().total().sub(
+            &elements_at_once
+                .align_down(cfg.element_ct().total())
+                .aligned(),
+        );
 
         let final_chunk_size = if 0 == trailing_elements.elements {
             cfg.chunk_size().alignment_quantum()
@@ -187,7 +190,10 @@ impl UfoFileWriteback {
             self.chunk_size.align_down(&ufo_body_offset).as_chunks(),
             chunk_number
         );
-        let file_writeback_offset: Bytes = self.header_offset.relative(ufo_body_offset).absolute_offset();
+        let file_writeback_offset: Bytes = self
+            .header_offset
+            .relative(ufo_body_offset)
+            .absolute_offset();
 
         debug!(target: "ufo_object", "writeback offset {:#x}", file_writeback_offset.bytes);
 
