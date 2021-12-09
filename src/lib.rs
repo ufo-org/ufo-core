@@ -33,12 +33,15 @@ pub type UfoPopulateFn =
 
 #[repr(C)]
 pub enum UfoWriteListenerEvent {
+    //TODO: rename these
+    /*UfoWB*/
     Writeback {
         start_idx: usize,
         end_idx: usize,
         data: *const u8,
     },
-    Reset,
+    /*UfoWB*/ Reset,
+    UfoWBDestroy,
 }
 
 pub type UfoWritebackListenerFn = dyn Fn(UfoWriteListenerEvent) + Sync + Send;

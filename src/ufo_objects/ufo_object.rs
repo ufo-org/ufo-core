@@ -3,8 +3,6 @@ use std::sync::Weak;
 use anyhow::Result;
 use crossbeam::sync::WaitGroup;
 
-use crate::UfoWriteListenerEvent;
-
 use crate::mmap_wrapers::*;
 use crate::return_checks::*;
 use crate::sizes::*;
@@ -42,9 +40,6 @@ impl UfoObject {
             ))?;
         }
         let writeback_bytes_freed = self.writeback_util.reset()?;
-        if let Some(listener) = &self.config.writeback_listener {
-            listener(UfoWriteListenerEvent::Reset);
-        }
         Ok(writeback_bytes_freed)
     }
 

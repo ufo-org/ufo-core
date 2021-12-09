@@ -7,7 +7,7 @@ use log::{debug, info, trace};
 use crate::events::UfoEvent;
 use crate::experimental_compat::Droplockster;
 use crate::populate_workers::PopulateWorkers;
-use crate::UfoEventSender;
+use crate::{UfoEventSender, UfoWriteListenerEvent};
 
 use crate::mmap_wrapers::*;
 use crate::sizes::*;
@@ -154,6 +154,10 @@ fn reset_impl(
     let (memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
     state.droplockster();
 
+    if let Some(wb_listener) = &ufo.config.writeback_listener {
+        wb_listener(UfoWriteListenerEvent::Reset);
+    }
+
     event_sender.send_event(UfoEvent::UfoReset {
         ufo_id: ufo_id.0,
         disk_freed: disk_freed.aligned().bytes,
@@ -222,6 +226,12 @@ fn free_impl(
 
     state.objects_by_segment.remove_by_start(&start_addr);
     debug!(target: "ufo_core", "removed from segment map {:?}", ufo.id);
+
+    state.droplockster();
+
+    if let Some(wb_listener) = &ufo.config.writeback_listener {
+        wb_listener(UfoWriteListenerEvent::UfoWBDestroy);
+    }
 
     event_sender.send_event(UfoEvent::FreeUfo {
         ufo_id: ufo_id.0,
