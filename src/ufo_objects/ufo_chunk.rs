@@ -253,9 +253,7 @@ impl UfoChunk {
             slice::from_raw_parts(chunk_ptr, chunk_length)
         };
 
-        println!("hashing {}", self.offset().chunk().absolute_offset().chunks);
         let calculated_hash = hash_function(chunk_slice);
-        println!("hashed {}", self.offset().chunk().absolute_offset().chunks);
 
         if known_hash != calculated_hash {
             let start = self.offset.as_index_floor().absolute_offset().aligned();
