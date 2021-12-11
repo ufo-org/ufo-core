@@ -239,10 +239,14 @@ impl UfoChunk {
             UfoInternalErr::UfoStateError("cannot has_listener without a listener!".to_string())
         })?;
 
-        let known_hash = self
-            .hash
-            .get()
-            .ok_or(UfoInternalErr::UfoStateError("no chunk hash".to_string()))?;
+        let hash = self.hash.get();
+        if hash.is_none() {
+             // No hash, means read only
+             self.length = None;
+             return Ok(());
+        }
+
+        let known_hash = hash.unwrap();
 
         let chunk_slice = unsafe {
             let chunk_ptr: *const u8 = ufo
