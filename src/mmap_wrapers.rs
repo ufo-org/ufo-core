@@ -209,7 +209,6 @@ impl Drop for OpenFile {
 
 pub struct MmapFd {
     mmap: BaseMmap,
-    _fd: OpenFile,
 }
 
 impl MmapFd {
@@ -228,7 +227,7 @@ impl MmapFd {
             huge_pagesize_log2,
             Some((fd.as_fd(), offset)),
         )?;
-        Ok(MmapFd { mmap, _fd: fd })
+        Ok(MmapFd { mmap, /*_fd: fd*/ })
     }
 }
 
