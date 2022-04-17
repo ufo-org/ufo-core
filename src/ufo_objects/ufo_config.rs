@@ -16,6 +16,20 @@ impl UfoObjectParams {
     }
 }
 
+impl std::fmt::Debug for UfoObjectParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UfoObjectParams")
+            .field("header_size", &self.header_size)
+            .field("stride", &self.stride)
+            .field("min_load_ct", &self.min_load_ct)
+            .field("read_only", &self.read_only)
+            .field("populate", &"Box(...)")
+            .field("writeback_listener", &if self.writeback_listener.is_some() { "Some(Box(...))" } else { "None" })
+            .field("element_ct", &self.element_ct)
+            .finish()
+    }
+}
+
 pub struct UfoObjectConfig {
     pub(crate) populate: Box<UfoPopulateFn>,
     pub(crate) writeback_listener: Option<Box<UfoWritebackListenerFn>>,
