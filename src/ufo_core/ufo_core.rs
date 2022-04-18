@@ -27,6 +27,7 @@ pub enum UfoInstanceMsg {
     Free(WaitGroup, UfoId),
 }
 
+#[derive(Debug)]
 pub struct UfoCoreConfig {
     pub writeback_temp_path: String,
     pub high_watermark: usize,
