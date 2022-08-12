@@ -148,11 +148,12 @@ fn reset_impl(
 
     debug!(target: "ufo_core", "resetting {:?}", ufo.id);
 
-    let disk_freed = ufo.reset_internal()?;
-
     let mut state = this.get_locked_state()?;
     let (memory_freed, chunks_freed) = state.loaded_chunks.drop_ufo_chunks(&ufo)?;
     state.droplockster();
+
+    // reset after doing all the chunk dropping since it MAY need access to the loaded data
+    let disk_freed = ufo.reset_internal()?;
 
     if let Some(wb_listener) = &ufo.config.writeback_listener {
         wb_listener(UfoWriteListenerEvent::Reset);
