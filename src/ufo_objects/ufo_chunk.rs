@@ -241,9 +241,9 @@ impl UfoChunk {
 
         let hash = self.hash.get();
         if hash.is_none() {
-             // No hash, means read only
-             self.length = None;
-             return Ok(());
+            // No hash, means read only
+            self.length = None;
+            return Ok(());
         }
 
         let known_hash = hash.unwrap();

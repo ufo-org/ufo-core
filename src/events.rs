@@ -182,9 +182,7 @@ where
                     // Shutdown with an active callback
                     (
                         UfoEventResult::Event(
-                            msg
-                            @
-                            UfoEventandTimestamp {
+                            msg @ UfoEventandTimestamp {
                                 event: UfoEvent::Shutdown,
                                 ..
                             },

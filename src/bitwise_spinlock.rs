@@ -73,7 +73,7 @@ impl Bitlock {
         }
     }
 
-    fn atomic_byte<'a>(&'a self, idx: &MappedIdx) -> &'a mut AtomicU8 {
+    fn atomic_byte(&self, idx: &MappedIdx) -> &'_ mut AtomicU8 {
         unsafe { &mut *(self.base.add(idx.byte_idx) as *mut u8 as *mut AtomicU8) }
     }
 

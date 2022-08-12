@@ -13,7 +13,7 @@ impl AtomicBitset {
         }
     }
 
-    fn atomic_byte<'a>(&'a self, byte: usize) -> &'a mut AtomicU8 {
+    fn atomic_byte(&self, byte: usize) -> &'_ mut AtomicU8 {
         let ptr = self.base as *mut u8;
         unsafe { &mut *(ptr.add(byte) as *mut u8 as *mut AtomicU8) }
     }
